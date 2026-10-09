@@ -111,20 +111,29 @@ class Persona:
             return random.Random()
         return random.Random(f"{self.seed}:{salt}")
 
+    def work_area(self) -> Window:
+        """Usable desktop area: the screen minus a panel (GNOME-style top bar or
+        KDE/XFCE-style bottom panel). Published as ``_NET_WORKAREA`` on the virtual
+        display so that ``screen.availHeight`` differs from ``screen.height`` like on
+        every real desktop."""
+        rng = self.rng("panel")
+        screen = self.screen
+        panel = rng.choice((28, 32, 36, 40, 48))
+        top = rng.random() < 0.7
+        return Window(screen.width, screen.height - panel, 0, panel if top else 0)
+
     def effective_window(self) -> Window:
         """Explicit window, or a plausible desktop layout derived from the screen."""
         if self.window is not None:
             return self.window
         rng = self.rng("window")
-        screen = self.screen
+        area = self.work_area()
         if rng.random() < 0.7:
-            # "Maximized" under a top panel of 28–48 px, as on GNOME/KDE desktops.
-            panel = rng.choice((28, 32, 36, 40, 48))
-            return Window(screen.width, screen.height - panel, 0, panel)
-        width = min(screen.width, rng.choice((1280, 1366, 1440, 1536, 1600)))
-        height = min(screen.height - 48, rng.choice((720, 768, 800, 864, 900)))
-        x = rng.randint(0, max(0, screen.width - width))
-        y = rng.randint(0, max(0, screen.height - height))
+            return area  # "maximized" into the work area
+        width = min(area.width, rng.choice((1280, 1366, 1440, 1536, 1600)))
+        height = min(area.height, rng.choice((720, 768, 800, 864, 900)))
+        x = area.x + rng.randint(0, max(0, area.width - width))
+        y = area.y + rng.randint(0, max(0, area.height - height))
         return Window(width, height, x, y)
 
     def proxy_parts(self) -> tuple[str, str, int, str | None, str | None] | None:

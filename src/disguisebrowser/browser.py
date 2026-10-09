@@ -5,6 +5,7 @@ display and the set of pages. Entry point is :func:`launch`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import random
@@ -16,13 +17,23 @@ from disguisebrowser.cdp import Connection, QuietCdpPolicy, Session
 from disguisebrowser.display import VirtualDisplay
 from disguisebrowser.errors import CdpError, LaunchError
 from disguisebrowser.input import PRESETS, HumanProfile
+from disguisebrowser.input.devices import CdpInputBackend, InputBackend
+from disguisebrowser.input.xtest import XTestInputBackend
 from disguisebrowser.launcher import ChromeProcess, launch_chrome
 from disguisebrowser.page import Page
 from disguisebrowser.persona import GPU_PRESETS, Persona
+from disguisebrowser.proxy import (
+    GeoInfo,
+    ProxyGateway,
+    UpstreamProxy,
+    languages_for_country,
+    resolve_geo,
+)
 
 log = logging.getLogger(__name__)
 
 DisplayMode = Literal["auto", "host", "virtual"]
+InputMode = Literal["auto", "cdp", "xtest"]
 
 
 class Browser:
@@ -34,15 +45,22 @@ class Browser:
         persona: Persona,
         display: VirtualDisplay | None,
         human: HumanProfile,
+        gateway: ProxyGateway | None = None,
+        geo: GeoInfo | None = None,
+        input_mode: InputMode = "cdp",
     ) -> None:
         self.connection = connection
         self.chrome = chrome
         self.persona = persona
         self.display = display
         self.human = human
+        self.gateway = gateway
+        self.geo = geo
+        self.input_mode: InputMode = input_mode
         self.version: dict[str, Any] = {}
         self._rng = persona.rng("input") if persona.seed is not None else random.Random()
         self._pages: dict[str, Page] = {}
+        self._active_page: Page | None = None
         self._initializing: set[str] = set()
         self._page_futures: dict[str, asyncio.Future[Page]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -52,6 +70,14 @@ class Browser:
     @property
     def root(self) -> Session:
         return self.connection.root
+
+    def _input_backend(self, page: Page, session: Session) -> InputBackend:
+        if self.input_mode == "xtest":
+            display_name = self.display.display if self.display else os.environ.get("DISPLAY")
+            if display_name:
+                return XTestInputBackend(display_name, page, session)
+            log.warning("input='xtest' requested but no X display is known; using CDP input")
+        return CdpInputBackend(session)
 
     async def _setup(self) -> None:
         self.version = await self.root.send("Browser.getVersion")
@@ -185,6 +211,8 @@ class Browser:
         await self.chrome.terminate()
         if self.display is not None:
             await self.display.stop()
+        if self.gateway is not None:
+            await self.gateway.stop()
 
     async def __aenter__(self) -> Browser:
         return self
@@ -229,6 +257,9 @@ def launch(
     user_data_dir: str | os.PathLike[str] | None = None,
     args: tuple[str, ...] | list[str] = (),
     human: str | HumanProfile = "default",
+    input: InputMode = "auto",
+    geoip: bool = False,
+    proxy_gateway: bool = True,
     window_manager: bool = True,
     unsafe: bool = False,
 ) -> LaunchHandle:
@@ -238,6 +269,14 @@ def launch(
     Xvfb desktop with a Mesa GPU identity; ``"auto"`` picks ``host`` when a
     display is available and ``virtual`` otherwise. ``headless`` is an explicit
     opt-in with weaker stealth (see ADR-4).
+
+    ``input``: ``"xtest"`` delivers mouse/keyboard events through the X server
+    (genuine OS-level events, no ``screenX == pageX`` artifact); ``"cdp"`` uses
+    DevTools ``Input.*``; ``"auto"`` picks XTest on a virtual display.
+
+    ``geoip``: resolve the proxy's exit IP and align timezone and languages of
+    the persona with it (requires ``persona.proxy``). ``proxy_gateway=False``
+    hands the proxy URL to Chrome directly (credentials are then impossible).
 
     Usage::
 
@@ -249,57 +288,137 @@ def launch(
     profile = PRESETS[human] if isinstance(human, str) else human
 
     async def start() -> Browser:
-        chosen_persona = persona or Persona.from_host()
-        virtual: VirtualDisplay | None = None
         if display == "host" and not headless and not os.environ.get("DISPLAY"):
             raise LaunchError(
                 "display='host' requires $DISPLAY; use display='virtual' (Xvfb) on servers"
             )
-        if isinstance(display, VirtualDisplay):
-            virtual = display
-        elif not headless and (
-            display == "virtual" or (display == "auto" and not os.environ.get("DISPLAY"))
-        ):
-            if chosen_persona.gpu is None:
-                # Stealthy by default: llvmpipe would otherwise announce "no real GPU".
-                preset = chosen_persona.rng("gpu").choice(sorted(GPU_PRESETS))
-                chosen_persona = replace(chosen_persona, gpu=GPU_PRESETS[preset])
-            virtual = VirtualDisplay(
-                chosen_persona.screen, gpu=chosen_persona.gpu, window_manager=window_manager
-            )
-        env: dict[str, str] = {}
-        extra_args = tuple(args)
-        if virtual is not None:
-            await virtual.start()
-            env = virtual.environment()
-            extra_args = virtual.chrome_args + extra_args
+        cleanup: list[Any] = []  # async callables, run in reverse on failure
         try:
+            # 1. Proxy gateway and geo alignment come first: the persona
+            #    (timezone/languages) must be final before Chrome starts.
+            chosen, gateway, geo, proxy_server = await _prepare_proxy(
+                persona or Persona.from_host(), geoip=geoip, use_gateway=proxy_gateway
+            )
+            if gateway is not None:
+                cleanup.append(gateway.stop)
+            # 2. Display.
+            chosen, virtual = _prepare_display(chosen, display, headless, window_manager)
+            env: dict[str, str] = {}
+            extra_args = tuple(args)
+            if virtual is not None:
+                await virtual.start()
+                cleanup.append(virtual.stop)
+                env = virtual.environment()
+                extra_args = virtual.chrome_args + extra_args
+            # 3. Chrome and the CDP connection.
             chrome = await launch_chrome(
-                persona=chosen_persona,
+                persona=chosen,
                 executable=executable,
                 user_data_dir=user_data_dir,
                 headless=headless,
                 extra_args=extra_args,
                 env=env,
+                proxy_server=proxy_server,
             )
-        except Exception:
-            if virtual is not None:
-                await virtual.stop()
-            raise
-        try:
+            cleanup.append(chrome.terminate)
             connection = await Connection.open(chrome.ws_url, policy=QuietCdpPolicy(unsafe=unsafe))
+            cleanup.append(connection.close)
             browser = Browser(
-                connection, chrome, persona=chosen_persona, display=virtual, human=profile
+                connection,
+                chrome,
+                persona=chosen,
+                display=virtual,
+                human=profile,
+                gateway=gateway,
+                geo=geo,
+                input_mode=_resolve_input_mode(input, virtual),
             )
             await browser._setup()
-        except Exception:
-            await chrome.terminate()
-            if virtual is not None:
-                await virtual.stop()
+        except BaseException:
+            for step in reversed(cleanup):
+                with contextlib.suppress(Exception):
+                    await step()
             raise
         log.info(
-            "%s ready on %s", browser.version.get("product"), env.get("DISPLAY", "host display")
+            "%s ready on %s, input=%s",
+            browser.version.get("product"),
+            env.get("DISPLAY", "host display"),
+            browser.input_mode,
         )
         return browser
 
     return LaunchHandle(start)
+
+
+async def _prepare_proxy(
+    persona: Persona, *, geoip: bool, use_gateway: bool
+) -> tuple[Persona, ProxyGateway | None, GeoInfo | None, str | None]:
+    """Start the gateway for ``persona.proxy`` and optionally align the persona
+    with the exit IP's geolocation. Returns the (possibly updated) persona, the
+    gateway, the geo info and the ``--proxy-server`` value for Chrome."""
+    if not persona.proxy:
+        if geoip:
+            raise LaunchError("geoip=True requires persona.proxy")
+        return persona, None, None, None
+    upstream = UpstreamProxy.parse(persona.proxy)
+    gateway: ProxyGateway | None = None
+    if use_gateway:
+        gateway = ProxyGateway(upstream)
+        await gateway.start()
+        proxy_server = gateway.url
+    elif upstream.has_credentials:
+        raise LaunchError("Chrome cannot use proxy credentials directly; keep proxy_gateway=True")
+    else:
+        proxy_server = f"{upstream.scheme}://{upstream.host}:{upstream.port}"
+    geo: GeoInfo | None = None
+    if geoip:
+        try:
+            geo = await resolve_geo(upstream)
+        except Exception:
+            if gateway is not None:
+                await gateway.stop()
+            raise
+        persona = replace(
+            persona,
+            timezone=geo.timezone or persona.timezone,
+            languages=languages_for_country(geo.country),
+        )
+        log.info(
+            "geoip: exit %s (%s) → timezone %s, languages %s",
+            geo.ip, geo.country, persona.timezone, ",".join(persona.languages),
+        )  # fmt: skip
+    return persona, gateway, geo, proxy_server
+
+
+def _prepare_display(
+    persona: Persona,
+    display: DisplayMode | VirtualDisplay,
+    headless: bool,
+    window_manager: bool,
+) -> tuple[Persona, VirtualDisplay | None]:
+    if isinstance(display, VirtualDisplay):
+        return persona, display
+    wants_virtual = not headless and (
+        display == "virtual" or (display == "auto" and not os.environ.get("DISPLAY"))
+    )
+    if not wants_virtual:
+        return persona, None
+    if persona.gpu is None:
+        # Stealthy by default: llvmpipe would otherwise announce "no real GPU".
+        preset = persona.rng("gpu").choice(sorted(GPU_PRESETS))
+        persona = replace(persona, gpu=GPU_PRESETS[preset])
+    virtual = VirtualDisplay(
+        persona.screen,
+        gpu=persona.gpu,
+        work_area=persona.work_area(),
+        window_manager=window_manager,
+    )
+    return persona, virtual
+
+
+def _resolve_input_mode(requested: InputMode, virtual: VirtualDisplay | None) -> InputMode:
+    if requested == "auto":
+        return "xtest" if virtual is not None else "cdp"
+    if requested == "xtest" and virtual is None and not os.environ.get("DISPLAY"):
+        raise LaunchError("input='xtest' needs an X display (virtual or host)")
+    return requested

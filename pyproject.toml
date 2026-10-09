@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio>=1.3",
     "ruff>=0.16",
     "mypy>=2.0",
+    "types-python-xlib>=0.33.0.20261006",
 ]
 
 [build-system]
@@ -62,6 +63,7 @@ mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"

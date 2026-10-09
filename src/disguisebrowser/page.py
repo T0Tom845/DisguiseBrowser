@@ -104,10 +104,12 @@ class Page:
         self._object_group = "g" + secrets.token_hex(6)
         self._context_id: int | None = None
         self._viewport: tuple[int, int] | None = None
+        self._origin: tuple[float, float, float] | None = None
         self._closed = False
         self.dialog_action: Literal["dismiss", "accept"] = "dismiss"
-        self.mouse = Mouse(session, profile=human, rng=self._rng, viewport=self._viewport_hint)
-        self.keyboard = Keyboard(session, profile=human, rng=self._rng)
+        backend = browser._input_backend(self, session)
+        self.mouse = Mouse(backend, profile=human, rng=self._rng, viewport=self._viewport_hint)
+        self.keyboard = Keyboard(backend, profile=human, rng=self._rng)
 
     # ------------------------------------------------------------------ lifecycle
     async def _initialize(self) -> None:
@@ -123,6 +125,9 @@ class Page:
         s.on("Page.lifecycleEvent", self._on_lifecycle)
         s.on("Page.javascriptDialogOpening", self._on_dialog)
         await s.send("Runtime.runIfWaitingForDebugger")
+        # A freshly opened tab is the one the user looks at: without this,
+        # document.hasFocus() stays false on a bare virtual display.
+        await self.activate()
 
     def _on_frame_navigated(self, params: dict[str, Any]) -> None:
         frame = params.get("frame", {})
@@ -152,6 +157,7 @@ class Page:
     def _invalidate_document(self) -> None:
         self._context_id = None
         self._viewport = None
+        self._origin = None
 
     @property
     def closed(self) -> bool:
@@ -227,6 +233,16 @@ class Page:
 
     async def bring_to_front(self) -> None:
         await self.session.send("Page.bringToFront")
+        self.browser._active_page = self
+
+    async def activate(self) -> None:
+        """Make this the visible, focused tab unless it already is.
+
+        Real users can only interact with the tab they see; input layers call
+        this before dispatching events.
+        """
+        if self.browser._active_page is not self:
+            await self.bring_to_front()
 
     # ------------------------------------------------------------------ evaluation
     async def _context(self) -> int:
@@ -401,6 +417,42 @@ class Page:
     def _viewport_hint(self) -> tuple[int, int]:
         return self._viewport or (1280, 720)
 
+    async def _wait_scroll_settled(self, *, started_from: Any = None, timeout: float = 1.0) -> None:
+        """Wait until Chrome's smooth-scroll animation stops moving the document.
+
+        Wheel events are processed asynchronously and animated; element boxes
+        read mid-animation would send clicks off-target. With ``started_from``
+        (the position before a gesture) we first wait for the scroll to begin.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        previous = await self.evaluate("[window.scrollX, window.scrollY]")
+        if started_from is not None:
+            begin_deadline = loop.time() + 0.4
+            while previous == started_from and loop.time() < begin_deadline:
+                await asyncio.sleep(0.03)
+                previous = await self.evaluate("[window.scrollX, window.scrollY]")
+        while loop.time() < deadline:
+            await asyncio.sleep(0.06)
+            current = await self.evaluate("[window.scrollX, window.scrollY]")
+            if current == previous:
+                return
+            previous = current
+
+    async def _content_origin(self) -> tuple[float, float, float]:
+        """Screen position of the viewport's top-left corner and the DPR.
+
+        Used by OS-level input to translate CSS coordinates into screen pixels.
+        """
+        if self._origin is None:
+            v = await self.evaluate(
+                "[window.screenX, window.screenY, outerWidth, innerWidth, outerHeight, "
+                "innerHeight, devicePixelRatio]"
+            )
+            sx, sy, ow, iw, oh, ih, dpr = (float(n) for n in v)
+            self._origin = (sx + (ow - iw) / 2, sy + (oh - ih), dpr)
+        return self._origin
+
     # ------------------------------------------------------------------ interaction
     async def _require(self, selector: str, timeout: float) -> ElementHandle:
         try:
@@ -432,7 +484,9 @@ class Page:
         width, height = await self.viewport()
         x = self._rng.uniform(width * 0.3, width * 0.7)
         y = self._rng.uniform(height * 0.3, height * 0.7)
+        before = await self.evaluate("[window.scrollX, window.scrollY]")
         await self.mouse.wheel(delta_y, x=x, y=y, humanize=humanize)
+        await self._wait_scroll_settled(started_from=before)
 
     # ------------------------------------------------------------------ capture & state
     async def screenshot(
@@ -566,6 +620,7 @@ class ElementHandle:
     async def scroll_into_view(self, *, humanize: bool = True) -> dict[str, float]:
         """Bring the element into the viewport with wheel gestures; returns its box."""
         for _ in range(8):
+            await self.page._wait_scroll_settled()
             box = await self.bounding_box()
             if box is None:
                 break
@@ -582,7 +637,7 @@ class ElementHandle:
             await self.page.scroll(delta, humanize=True)
             await asyncio.sleep(self.page._rng.uniform(0.08, 0.2))
         await self._call(_SCROLL_INTO_VIEW_FALLBACK_JS)
-        await asyncio.sleep(0.05)
+        await self.page._wait_scroll_settled()
         box = await self.bounding_box()
         if box is None:
             raise ElementNotFoundError("element has no layout box (hidden or detached)")

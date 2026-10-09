@@ -1,9 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
-from disguisebrowser.errors import LaunchError
 from disguisebrowser.launcher import (
     LaunchConfig,
     build_args,
@@ -45,14 +42,13 @@ def test_launch_args_follow_the_quiet_recipe(tmp_path: Path) -> None:
         assert not any(a.startswith(flag) for a in args), flag
 
 
-def test_proxy_flag_without_credentials(tmp_path: Path) -> None:
-    args = build_args(_config(tmp_path, proxy="socks5://10.0.0.1:1080"))
-    assert "--proxy-server=socks5://10.0.0.1:1080" in args
-
-
-def test_authenticated_proxy_is_rejected_for_now(tmp_path: Path) -> None:
-    with pytest.raises(LaunchError, match="authenticated proxies"):
-        build_args(_config(tmp_path, proxy="http://user:pass@10.0.0.1:8080"))
+def test_proxy_server_is_whatever_the_gateway_decided(tmp_path: Path) -> None:
+    config = _config(tmp_path, proxy="http://user:pass@10.0.0.1:8080")
+    assert not any(a.startswith("--proxy-server") for a in build_args(config))
+    config.proxy_server = "socks5://127.0.0.1:40123"
+    args = build_args(config)
+    assert "--proxy-server=socks5://127.0.0.1:40123" in args
+    assert not any("user:pass" in a for a in args), "credentials never reach the command line"
 
 
 def test_headless_user_agent_strips_headless_marker() -> None:

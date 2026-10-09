@@ -1,9 +1,14 @@
-"""Mouse and keyboard driven through CDP ``Input.*`` with humanized timing.
+"""Mouse and keyboard with humanized timing over a pluggable event backend.
 
-CDP-dispatched events are *trusted* (``isTrusted === true``) — the browser
-generates them itself. What this layer adds is realistic kinematics; what it
-cannot fix is the known Chrome artifact ``screenX == pageX`` for CDP events
-(crbug 40280325), which phase 2 addresses with OS-level XTest input.
+Two backends exist:
+
+* :class:`CdpInputBackend` — DevTools ``Input.*``. Events are trusted
+  (``isTrusted === true``) but carry Chrome's known artifact
+  ``screenX == pageX`` (crbug 40280325) that Cloudflare Turnstile checks.
+* ``XTestInputBackend`` (``input/xtest.py``) — synthesizes events in the X
+  server, so Chrome receives them exactly like from a physical device.
+
+The kinematics (paths, timing) live in ``humanizer.py`` and are shared.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable
-from typing import Literal
+from typing import ClassVar, Literal, Protocol
 
 from disguisebrowser.cdp import Session
 from disguisebrowser.input import keys as keymap
@@ -27,6 +32,71 @@ Button = Literal["left", "right", "middle"]
 _BUTTON_BITS: dict[Button, int] = {"left": 1, "right": 2, "middle": 4}
 
 
+class InputBackend(Protocol):
+    async def mouse_move(self, x: float, y: float, buttons: int) -> None: ...
+
+    async def mouse_button(
+        self, pressed: bool, button: Button, *, x: float, y: float, buttons: int, click_count: int
+    ) -> None: ...
+
+    async def mouse_wheel(self, x: float, y: float, delta_y: float) -> None: ...
+
+    async def key(
+        self, pressed: bool, definition: keymap.KeyDefinition, modifiers: int
+    ) -> None: ...
+
+    async def insert_text(self, text: str) -> None: ...
+
+
+class CdpInputBackend:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    async def _mouse(self, event_type: str, x: float, y: float, **extra: object) -> None:
+        await self._session.send(
+            "Input.dispatchMouseEvent",
+            {
+                "type": event_type,
+                "x": round(x, 2),
+                "y": round(y, 2),
+                "pointerType": "mouse",
+                **extra,
+            },
+        )
+
+    async def mouse_move(self, x: float, y: float, buttons: int) -> None:
+        await self._mouse("mouseMoved", x, y, button="none", buttons=buttons)
+
+    async def mouse_button(
+        self, pressed: bool, button: Button, *, x: float, y: float, buttons: int, click_count: int
+    ) -> None:
+        await self._mouse(
+            "mousePressed" if pressed else "mouseReleased",
+            x, y, button=button, buttons=buttons, clickCount=click_count,
+        )  # fmt: skip
+
+    async def mouse_wheel(self, x: float, y: float, delta_y: float) -> None:
+        await self._mouse("mouseWheel", x, y, deltaX=0, deltaY=delta_y, buttons=0)
+
+    async def key(self, pressed: bool, definition: keymap.KeyDefinition, modifiers: int) -> None:
+        params: dict[str, object] = {
+            "type": "keyDown" if pressed else "keyUp",
+            "key": definition.key,
+            "code": definition.code,
+            "windowsVirtualKeyCode": definition.key_code,
+            "nativeVirtualKeyCode": definition.key_code,
+            "modifiers": modifiers,
+            "location": definition.location,
+        }
+        if pressed and definition.text:
+            params["text"] = definition.text
+            params["unmodifiedText"] = definition.text.lower()
+        await self._session.send("Input.dispatchKeyEvent", params)
+
+    async def insert_text(self, text: str) -> None:
+        await self._session.send("Input.insertText", {"text": text})
+
+
 async def _sleep_ms(ms: float) -> None:
     if ms > 0:
         await asyncio.sleep(ms / 1000.0)
@@ -35,13 +105,13 @@ async def _sleep_ms(ms: float) -> None:
 class Mouse:
     def __init__(
         self,
-        session: Session,
+        backend: InputBackend,
         *,
         profile: HumanProfile = PRESETS["default"],
         rng: random.Random | None = None,
         viewport: Callable[[], tuple[int, int]] | None = None,
     ) -> None:
-        self._session = session
+        self._backend = backend
         self.profile = profile
         self._rng = rng or random.Random()
         self._viewport = viewport
@@ -61,22 +131,11 @@ class Mouse:
             return (0.0, self._rng.uniform(0, height))
         return (float(width), self._rng.uniform(0, height))
 
-    async def _dispatch(self, event_type: str, x: float, y: float, **extra: object) -> None:
-        params: dict[str, object] = {
-            "type": event_type,
-            "x": round(x, 2),
-            "y": round(y, 2),
-            "buttons": self._buttons,
-            "pointerType": "mouse",
-            **extra,
-        }
-        await self._session.send("Input.dispatchMouseEvent", params)
-
     async def move(
         self, x: float, y: float, *, humanize: bool = True, target_width: float = 24.0
     ) -> None:
         if not humanize:
-            await self._dispatch("mouseMoved", x, y, button="none")
+            await self._backend.mouse_move(x, y, self._buttons)
             self.position = (x, y)
             return
         start = self._origin()
@@ -89,19 +148,23 @@ class Mouse:
             delay = t0 + point.t / 1000.0 - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
-            await self._dispatch("mouseMoved", point.x, point.y, button="none")
+            await self._backend.mouse_move(point.x, point.y, self._buttons)
             self.position = (point.x, point.y)
         self.position = (x, y)
 
     async def down(self, button: Button = "left", *, click_count: int = 1) -> None:
         x, y = self.position or self._origin()
         self._buttons |= _BUTTON_BITS[button]
-        await self._dispatch("mousePressed", x, y, button=button, clickCount=click_count)
+        await self._backend.mouse_button(
+            True, button, x=x, y=y, buttons=self._buttons, click_count=click_count
+        )
 
     async def up(self, button: Button = "left", *, click_count: int = 1) -> None:
         x, y = self.position or self._origin()
         self._buttons &= ~_BUTTON_BITS[button]
-        await self._dispatch("mouseReleased", x, y, button=button, clickCount=click_count)
+        await self._backend.mouse_button(
+            False, button, x=x, y=y, buttons=self._buttons, click_count=click_count
+        )
 
     async def click(
         self,
@@ -131,81 +194,60 @@ class Mouse:
             px, py = self.position or self._origin()
             x = px if x is None else x
             y = py if y is None else y
-        self.position = (x, y)
+        if self.position != (x, y):
+            await self.move(x, y, humanize=humanize)
         if not humanize:
-            await self._dispatch("mouseWheel", x, y, deltaX=0, deltaY=delta_y)
+            await self._backend.mouse_wheel(x, y, delta_y)
             return
         for chunk, pause in scroll_steps(delta_y, rng=self._rng, profile=self.profile):
-            await self._dispatch("mouseWheel", x, y, deltaX=0, deltaY=chunk)
+            await self._backend.mouse_wheel(x, y, chunk)
             await _sleep_ms(pause)
 
 
 class Keyboard:
     def __init__(
         self,
-        session: Session,
+        backend: InputBackend,
         *,
         profile: HumanProfile = PRESETS["default"],
         rng: random.Random | None = None,
     ) -> None:
-        self._session = session
+        self._backend = backend
         self.profile = profile
         self._rng = rng or random.Random()
         self._modifiers = 0
 
-    async def _key_event(self, event_type: str, definition: keymap.KeyDefinition) -> None:
-        params: dict[str, object] = {
-            "type": event_type,
-            "key": definition.key,
-            "code": definition.code,
-            "windowsVirtualKeyCode": definition.key_code,
-            "nativeVirtualKeyCode": definition.key_code,
-            "modifiers": self._modifiers,
-            "location": definition.location,
-        }
-        if event_type == "keyDown" and definition.text:
-            params["text"] = definition.text
-            params["unmodifiedText"] = definition.text.lower()
-        await self._session.send("Input.dispatchKeyEvent", params)
+    _MODIFIER_BITS: ClassVar[dict[str, int]] = {
+        "Shift": keymap.MODIFIER_SHIFT,
+        "Control": keymap.MODIFIER_CTRL,
+        "Alt": keymap.MODIFIER_ALT,
+        "Meta": keymap.MODIFIER_META,
+    }
 
     async def down(self, key: str) -> None:
         definition = keymap.definition_for_name(key)
-        if key == "Shift":
-            self._modifiers |= keymap.MODIFIER_SHIFT
-        elif key == "Control":
-            self._modifiers |= keymap.MODIFIER_CTRL
-        elif key == "Alt":
-            self._modifiers |= keymap.MODIFIER_ALT
-        elif key == "Meta":
-            self._modifiers |= keymap.MODIFIER_META
-        await self._key_event("keyDown", definition)
+        self._modifiers |= self._MODIFIER_BITS.get(key, 0)
+        await self._backend.key(True, definition, self._modifiers)
 
     async def up(self, key: str) -> None:
         definition = keymap.definition_for_name(key)
-        if key == "Shift":
-            self._modifiers &= ~keymap.MODIFIER_SHIFT
-        elif key == "Control":
-            self._modifiers &= ~keymap.MODIFIER_CTRL
-        elif key == "Alt":
-            self._modifiers &= ~keymap.MODIFIER_ALT
-        elif key == "Meta":
-            self._modifiers &= ~keymap.MODIFIER_META
-        await self._key_event("keyUp", definition)
+        self._modifiers &= ~self._MODIFIER_BITS.get(key, 0)
+        await self._backend.key(False, definition, self._modifiers)
 
     async def press(self, key: str, *, humanize: bool = True) -> None:
         """Press and release a named key (``Enter``, ``Tab``, ``ArrowDown`` …) or a character."""
         definition = keymap.definition_for_name(key)
         if definition.shift:
             await self.down("Shift")
-        await self._key_event("keyDown", definition)
+        await self._backend.key(True, definition, self._modifiers)
         await _sleep_ms(self._rng.uniform(35.0, 110.0) if humanize else 5.0)
-        await self._key_event("keyUp", definition)
+        await self._backend.key(False, definition, self._modifiers)
         if definition.shift:
             await self.up("Shift")
 
     async def insert_text(self, text: str) -> None:
         """Commit text the way an IME does (no key events). Used for non-US characters."""
-        await self._session.send("Input.insertText", {"text": text})
+        await self._backend.insert_text(text)
 
     async def type(self, text: str, *, humanize: bool = True) -> None:
         """Type ``text`` character by character with human inter-key timing.

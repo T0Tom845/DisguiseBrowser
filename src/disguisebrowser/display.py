@@ -1,9 +1,14 @@
-"""Virtual desktop for servers: Xvfb with GLX, an optional window manager and a
-GPU identity applied at the Mesa driver level (no JavaScript involved).
+"""Virtual desktop for servers: Xvfb with GLX, an optional window manager, an
+EWMH work-area shim and a GPU identity applied at the Mesa driver level (no
+JavaScript involved).
 
 Why not headless? Headless Chrome announces itself (``HeadlessChrome`` UA,
 800x600 screen without a work area, DPR 1, no GPU). A real X server with a
 software GL stack looks like an ordinary Linux desktop instead — see ADR-4/5.
+
+Several displays can run side by side in one process (one per browser), so
+display numbers are reserved process-wide and Xvfb start-up is retried when
+another process grabbed the same number first.
 """
 
 from __future__ import annotations
@@ -17,8 +22,11 @@ import tempfile
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from Xlib import Xatom
+from Xlib import display as xlib_display
+
 from disguisebrowser.errors import DisplayError
-from disguisebrowser.persona import GpuIdentity, Screen
+from disguisebrowser.persona import GpuIdentity, Screen, Window
 from disguisebrowser.process import die_with_parent
 
 log = logging.getLogger(__name__)
@@ -31,6 +39,8 @@ WINDOW_MANAGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("xfwm4", ("--sm-client-disable",)),
     ("icewm", ()),
 )
+_START_ATTEMPTS = 5
+_reserved_displays: set[int] = set()
 
 
 class MesaIdentity:
@@ -71,6 +81,47 @@ class MesaIdentity:
         }
 
 
+def publish_work_area(display_name: str, screen: Screen, work_area: Window) -> None:
+    """Set the EWMH root-window properties Chrome reads for ``screen.avail*``.
+
+    Chrome only requires ``_NET_SUPPORTED`` to list ``_NET_WORKAREA`` and a
+    current desktop index; no window manager has to be running. We deliberately
+    do not advertise ``_NET_ACTIVE_WINDOW`` so Chrome keeps focusing its own
+    windows via ``XSetInputFocus``.
+    """
+    conn = xlib_display.Display(display_name)
+    try:
+        root = conn.screen().root
+        atom = conn.intern_atom
+        supported = [
+            atom(name)
+            for name in (
+                "_NET_SUPPORTED",
+                "_NET_WORKAREA",
+                "_NET_NUMBER_OF_DESKTOPS",
+                "_NET_CURRENT_DESKTOP",
+                "_NET_DESKTOP_GEOMETRY",
+                "_NET_DESKTOP_VIEWPORT",
+            )
+        ]
+        root.change_property(atom("_NET_SUPPORTED"), Xatom.ATOM, 32, supported)
+        root.change_property(atom("_NET_NUMBER_OF_DESKTOPS"), Xatom.CARDINAL, 32, [1])
+        root.change_property(atom("_NET_CURRENT_DESKTOP"), Xatom.CARDINAL, 32, [0])
+        root.change_property(
+            atom("_NET_DESKTOP_GEOMETRY"), Xatom.CARDINAL, 32, [screen.width, screen.height]
+        )
+        root.change_property(atom("_NET_DESKTOP_VIEWPORT"), Xatom.CARDINAL, 32, [0, 0])
+        root.change_property(
+            atom("_NET_WORKAREA"),
+            Xatom.CARDINAL,
+            32,
+            [work_area.x, work_area.y, work_area.width, work_area.height],
+        )
+        conn.sync()
+    finally:
+        conn.close()
+
+
 class VirtualDisplay:
     """An Xvfb server sized from the persona's screen, optionally with a WM."""
 
@@ -79,14 +130,17 @@ class VirtualDisplay:
         screen: Screen,
         *,
         gpu: GpuIdentity | None = None,
+        work_area: Window | None = None,
         window_manager: bool = True,
         dpi: int = 96,
     ) -> None:
         self.screen = screen
         self.gpu = gpu
+        self.work_area = work_area
         self.window_manager = window_manager
         self.dpi = dpi
         self.display: str | None = None
+        self.number: int | None = None
         self._xvfb: asyncio.subprocess.Process | None = None
         self._wm: asyncio.subprocess.Process | None = None
         self._workdir: Path | None = None
@@ -110,12 +164,46 @@ class VirtualDisplay:
         if xvfb is None:
             raise DisplayError("Xvfb is not installed (apt install xvfb)")
         self._workdir = Path(tempfile.mkdtemp(prefix="disguise-display-"))
-        number = _free_display_number()
-        self.display = f":{number}"
         geometry = f"{self.screen.width}x{self.screen.height}x24"
+        last_error: DisplayError | None = None
+        for _ in range(_START_ATTEMPTS):
+            number = _reserve_display_number()
+            try:
+                self._xvfb = await self._spawn_xvfb(xvfb, number, geometry)
+                await self._wait_for_socket(number)
+            except DisplayError as exc:
+                last_error = exc
+                _reserved_displays.discard(number)
+                if self._xvfb is not None and self._xvfb.returncode is None:
+                    self._xvfb.kill()
+                    await self._xvfb.wait()
+                self._xvfb = None
+                if "already active" in str(exc) or "listening sockets" in str(exc):
+                    continue  # lost a race against another process; try the next number
+                break
+            self.number = number
+            self.display = f":{number}"
+            break
+        if self._xvfb is None:
+            shutil.rmtree(self._workdir, ignore_errors=True)
+            self._workdir = None
+            raise last_error or DisplayError("could not start Xvfb")
+        assert self.display is not None
+        self._env = {"DISPLAY": self.display, "LIBGL_ALWAYS_SOFTWARE": "1"}
+        if self.gpu is not None:
+            self._env.update(MesaIdentity(self.gpu).materialize(self._workdir / "drirc.d"))
+        if self.window_manager:
+            await self._start_window_manager()
+        if self._wm is None and self.work_area is not None:
+            await asyncio.to_thread(publish_work_area, self.display, self.screen, self.work_area)
+        log.info("virtual display %s ready (%s)", self.display, geometry)
+
+    async def _spawn_xvfb(
+        self, xvfb: str, number: int, geometry: str
+    ) -> asyncio.subprocess.Process:
         cmd = [
             xvfb,
-            self.display,
+            f":{number}",
             "-screen", "0", geometry,
             "-dpi", str(self.dpi),
             "+extension", "GLX",
@@ -124,29 +212,19 @@ class VirtualDisplay:
             "-nolisten", "tcp",
             "-noreset",
         ]  # fmt: skip
-        self._xvfb = await asyncio.create_subprocess_exec(
+        return await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=die_with_parent,
         )
-        try:
-            await self._wait_for_socket(number)
-        except DisplayError:
-            await self.stop()
-            raise
-        self._env = {"DISPLAY": self.display, "LIBGL_ALWAYS_SOFTWARE": "1"}
-        if self.gpu is not None:
-            self._env.update(MesaIdentity(self.gpu).materialize(self._workdir / "drirc.d"))
-        if self.window_manager:
-            await self._start_window_manager()
-        log.info("virtual display %s ready (%s)", self.display, geometry)
 
     async def _wait_for_socket(self, number: int, timeout: float = 10.0) -> None:
         socket_path = Path(f"/tmp/.X11-unix/X{number}")
-        deadline = asyncio.get_running_loop().time() + timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         assert self._xvfb is not None
-        while asyncio.get_running_loop().time() < deadline:
+        while loop.time() < deadline:
             if socket_path.exists():  # noqa: ASYNC240 — a local stat() call, microseconds
                 return
             if self._xvfb.returncode is not None:
@@ -172,12 +250,14 @@ class VirtualDisplay:
                 stderr=asyncio.subprocess.DEVNULL,
                 preexec_fn=die_with_parent,
             )
-            log.info("window manager %s started on %s", name, self.display)
+            log.info(
+                "window manager %s started on %s (it owns _NET_WORKAREA; add a panel such as "
+                "tint2 for a desktop-like work area)",
+                name,
+                self.display,
+            )
             return
-        log.warning(
-            "no window manager found (openbox/fluxbox/…); windows will have no focus/work-area "
-            "semantics — run `disguise doctor` for details"
-        )
+        log.debug("no window manager found; publishing the work area ourselves")
 
     def environment(self) -> dict[str, str]:
         """Environment variables Chrome must inherit to use this display."""
@@ -204,7 +284,10 @@ class VirtualDisplay:
         if self._workdir is not None:
             shutil.rmtree(self._workdir, ignore_errors=True)
             self._workdir = None
+        if self.number is not None:
+            _reserved_displays.discard(self.number)
         self.display = None
+        self.number = None
         self._env = {}
 
     async def __aenter__(self) -> VirtualDisplay:
@@ -229,8 +312,16 @@ def _display_in_use(number: int) -> bool:
         return True
 
 
-def _free_display_number(start: int = 99, end: int = 999) -> int:
+def _reserve_display_number(start: int = 99, end: int = 999) -> int:
+    """Pick a display number no other display *in this process* holds.
+
+    Runs without awaiting, so concurrent ``start()`` calls in one event loop
+    cannot interleave here; cross-process races are handled by retrying in
+    :meth:`VirtualDisplay.start`.
+    """
     for number in range(start, end):
-        if not _display_in_use(number):
-            return number
+        if number in _reserved_displays or _display_in_use(number):
+            continue
+        _reserved_displays.add(number)
+        return number
     raise DisplayError("no free X display number between :99 and :999")

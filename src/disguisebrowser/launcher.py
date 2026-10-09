@@ -99,6 +99,8 @@ class LaunchConfig:
     extra_args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     initial_url: str = "about:blank"
+    proxy_server: str | None = None
+    """What Chrome is told to use — normally the local gateway, see ``disguisebrowser.proxy``."""
 
 
 def build_args(config: LaunchConfig) -> list[str]:
@@ -114,16 +116,8 @@ def build_args(config: LaunchConfig) -> list[str]:
         f"--window-size={window.width},{window.height}",
         f"--window-position={window.x},{window.y}",
     ]
-    proxy = persona.proxy_parts()
-    if proxy is not None:
-        scheme, host, port, username, _ = proxy
-        if username:
-            # v0.1 has no local auth gateway yet; Chrome cannot take inline credentials.
-            raise LaunchError(
-                "authenticated proxies are not supported yet (planned Proxy Gateway); "
-                "use an IP-whitelisted proxy or a local forwarder"
-            )
-        args.append(f"--proxy-server={scheme}://{host}:{port}")
+    if config.proxy_server:
+        args.append(f"--proxy-server={config.proxy_server}")
     if config.headless:
         args.append("--headless=new")
         args.append(f"--user-agent={headless_user_agent(chrome_version(config.executable))}")
@@ -218,6 +212,7 @@ async def launch_chrome(
     headless: bool = False,
     extra_args: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
+    proxy_server: str | None = None,
     startup_timeout: float = 30.0,
 ) -> ChromeProcess:
     problems = persona.validate()
@@ -240,6 +235,7 @@ async def launch_chrome(
         headless=headless,
         extra_args=extra_args,
         env=dict(env or {}),
+        proxy_server=proxy_server,
     )
     process_env = {**os.environ, **config.env}
     if persona.timezone:

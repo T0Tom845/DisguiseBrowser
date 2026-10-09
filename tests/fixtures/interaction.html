@@ -21,6 +21,11 @@
   window.__events = { clicks: [], moves: 0, wheels: 0, keys: [] };
   document.addEventListener('mousemove', () => { window.__events.moves += 1; });
   document.addEventListener('wheel', () => { window.__events.wheels += 1; });
+  document.getElementById('target').addEventListener('pointerdown', (e) => {
+    window.__events.lastPointerDown = {
+      pressure: e.pressure, pointerType: e.pointerType, isTrusted: e.isTrusted,
+    };
+  });
   document.getElementById('target').addEventListener('click', (e) => {
     window.__events.clicks.push({
       isTrusted: e.isTrusted, x: e.clientX, y: e.clientY, button: e.button,

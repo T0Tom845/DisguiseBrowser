@@ -154,8 +154,10 @@ def typing_delays(
     return delays
 
 
-WHEEL_NOTCH_PX = 53.0
-"""Pixels per wheel notch as Chrome on Linux reports them (3 lines × ~17.67 px)."""
+WHEEL_NOTCH_PX = 120.0
+"""``wheel.deltaY`` per physical notch, measured on Chrome 154 / X11 via XTEST
+button 4/5. CDP wheel events are generated with the same granularity so that
+both backends scroll identically."""
 
 
 def scroll_steps(
