@@ -22,6 +22,7 @@ from disguisebrowser.errors import (
     NavigationError,
 )
 from disguisebrowser.input import PRESETS, HumanProfile, Keyboard, Mouse
+from disguisebrowser.snapshot import Snapshot, format_ax_tree
 
 if TYPE_CHECKING:
     from disguisebrowser.browser import Browser
@@ -105,6 +106,7 @@ class Page:
         self._context_id: int | None = None
         self._viewport: tuple[int, int] | None = None
         self._origin: tuple[float, float, float] | None = None
+        self._refs: dict[str, int] = {}
         self._closed = False
         self.dialog_action: Literal["dismiss", "accept"] = "dismiss"
         backend = browser._input_backend(self, session)
@@ -401,6 +403,57 @@ class Page:
                     f"selector {selector!r} did not become {state} within {timeout}s"
                 ) from None
             raise
+
+    async def snapshot(self, *, max_lines: int = 400) -> Snapshot:
+        """Accessibility-tree snapshot with ``[ref=eN]`` handles (see ``snapshot.py``)."""
+        result = await self.session.send("Accessibility.getFullAXTree", timeout=60)
+        snap = format_ax_tree(result["nodes"], max_lines=max_lines)
+        self._refs = snap.refs
+        return snap
+
+    async def element_by_ref(self, ref: str) -> ElementHandle:
+        """Resolve a ``[ref=eN]`` from the last :meth:`snapshot` into a handle."""
+        backend_node_id = self._refs.get(ref)
+        if backend_node_id is None:
+            raise ElementNotFoundError(f"unknown ref {ref!r}; take a new snapshot first")
+        return await self.element_by_backend_node(backend_node_id)
+
+    async def element_by_backend_node(self, backend_node_id: int) -> ElementHandle:
+        try:
+            result = await self.session.send(
+                "DOM.resolveNode",
+                {
+                    "backendNodeId": backend_node_id,
+                    "executionContextId": await self._context(),
+                    "objectGroup": self._object_group,
+                },
+            )
+        except CdpError as exc:
+            raise ElementNotFoundError(f"node {backend_node_id} is gone: {exc.message}") from None
+        return ElementHandle(self, result["object"]["objectId"])
+
+    async def go_back(self, *, wait_until: WaitUntil = "load", timeout: float = 30.0) -> bool:
+        return await self._history_step(-1, wait_until, timeout)
+
+    async def go_forward(self, *, wait_until: WaitUntil = "load", timeout: float = 30.0) -> bool:
+        return await self._history_step(1, wait_until, timeout)
+
+    async def _history_step(self, offset: int, wait_until: WaitUntil, timeout: float) -> bool:
+        history = await self.session.send("Page.getNavigationHistory")
+        index = history["currentIndex"] + offset
+        entries = history["entries"]
+        if not 0 <= index < len(entries):
+            return False
+        future = self.session.expect(
+            "Page.lifecycleEvent",
+            lambda e: (
+                e.get("frameId") == self._main_frame_id
+                and e.get("name") == _LIFECYCLE_NAMES[wait_until]
+            ),
+        )
+        await self.session.send("Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]})
+        await asyncio.wait_for(future, timeout)
+        return True
 
     async def content(self) -> str:
         return str(await self.evaluate("document.documentElement.outerHTML"))

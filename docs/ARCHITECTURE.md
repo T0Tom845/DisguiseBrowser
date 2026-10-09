@@ -244,7 +244,10 @@ CreepJS, `fingerprint-scan.com`, `pixelscan.net`, `bot.incolumitas.com`,
 - **ADR‑6. Client Hints неприкосновенны.** Любой UA‑override без полного
   `userAgentMetadata` стирает `sec-ch-ua*` — серверная проверка без JS. В
   headed‑режиме UA не трогаем вовсе.
-- **ADR‑7. Ввод: CDP в фазе 1, XTest в фазе 2.** См. 6.6.
+- **ADR‑7. Ввод: XTest по умолчанию на X‑дисплее, CDP как fallback.** Исходная
+  мотивация (`screenX == pageX`) на Chrome 154 не подтвердилась, но XTest
+  остаётся строго более подлинным: нет CDP‑трафика `Input.*`, `pressure` и
+  тайминги — как у физических устройств (см. раздел 11). См. 6.6.
 - **ADR‑8. Честный Linux‑десктоп по умолчанию.** Спуфинг Windows без шрифтов
   Windows — противоречие, которое ловят FingerprintJS/CreepJS. Персона
   «Windows» допускается только при наличии шрифтов и остаётся opt‑in.
@@ -293,8 +296,9 @@ CreepJS, `fingerprint-scan.com`, `pixelscan.net`, `bot.incolumitas.com`,
   зато полностью когерентный. Windows‑персона требует шрифтов Windows (лицензия).
 - **Арms race:** любая публичная техника со временем детектится. Поэтому P6
   (измеримость) и минимальный, легко меняемый стелс‑слой важнее «толщины» патчей.
-- **CDP‑ввод детектируется Turnstile** по `screenX`; до фазы 2 цели с
-  интерактивным Turnstile могут не проходить.
+- **XTest печатает через US‑раскладку**; символы вне ASCII идут через
+  `Input.insertText` (путь IME). Для русскоязычных персон нужна раскладка ЙЦУКЕН
+  в Xvfb (`setxkbmap`) — следующий шаг.
 - **Открытый DevTools‑порт** на loopback — поверхность атаки для других
   локальных процессов; на многопользовательских хостах нужен изолированный
   пользователь/контейнер.
@@ -331,9 +335,41 @@ CSS/XPath, `ElementHandle`, ожидания через MutationObserver вну�
 Xvfb без GPU: 5/5 PASS (sannysoft 0/57, rebrowser без красных, dabi «human»,
 browserscan «Normal», TLS = Chrome).
 
-**Следующие итерации (в порядке приоритета):** Proxy Gateway (auth, SOCKS5,
-geo→TZ/locale, WebRTC‑политика), MCP‑сервер, XTest‑ввод, `_NET_WORKAREA` для
-`screen.avail*` на Xvfb, воркер‑контексты, Docker‑образ.
+**Статус v0.2 (реализовано поверх v0.1).**
+
+- *Proxy Gateway* (`proxy.py`): локальный SOCKS5‑сервер без auth для Chrome →
+  upstream HTTP(S) CONNECT или SOCKS5 с учётными данными. Chrome видит только
+  SOCKS‑шлюз: не шлёт `Proxy-*`‑заголовков, резолвит DNS на стороне прокси, креды
+  не попадают в командную строку. Geo‑lookup exit‑IP идёт через тот же туннель
+  (TLS поверх туннеля через `StreamWriter.start_tls`); `launch(geoip=True)`
+  переписывает таймзону и языки персоны по стране exit‑IP.
+- *XTest‑ввод* (`input/xtest.py`): события синтезируются X‑сервером, Chrome
+  получает их как от физических устройств; бэкенд по умолчанию на X‑дисплее,
+  CDP остаётся fallback. Маппинг CSS‑координат в экранные — через
+  `window.screenX/Y` и разницу outer/inner размеров окна; перед вводом вкладка
+  активируется (`Page.bringToFront`).
+- *EWMH‑рабочая область* (`display.publish_work_area`): без оконного менеджера
+  публикуем `_NET_SUPPORTED` + `_NET_WORKAREA` + `_NET_CURRENT_DESKTOP` на root —
+  Chrome честно отдаёт `screen.availHeight < screen.height` и `availTop`.
+  `_NET_ACTIVE_WINDOW` намеренно не объявляем, чтобы Chrome фокусировал окно сам.
+- *Несколько браузеров в одном процессе*: номера дисплеев резервируются
+  процесс‑локально, старт Xvfb повторяется при межпроцессной гонке; проверено
+  тремя параллельными `launch()`.
+- *MCP‑сервер* (`mcp_server.py`, extra `mcp`): сессии `browser_launch → session_id`,
+  accessibility‑snapshot с `[ref=eN]` (`snapshot.py`, через
+  `Accessibility.getFullAXTree` + `DOM.resolveNode`), инструменты навигации,
+  ввода, извлечения и вкладок; stdio и Streamable HTTP.
+
+**Измерено про ввод (Chrome 154, X11, Xvfb).** Артефакт `screenX == pageX`
+CDP‑событий (crbug 40280325) в headed‑режиме не воспроизводится. Различия,
+которые остались: CDP `pointerdown.pressure == 0` против `0.5` у XTest/физической
+мыши; реальный щелчок колеса даёт `wheel.deltaY = 120` (CDP‑бэкенд калиброван на
+это значение). Это и является обоснованием XTest по умолчанию (уточнение ADR‑7).
+
+**Следующие итерации:** Docker‑образ (Chrome stable, Xvfb, Mesa, openbox+tint2,
+шрифты, non‑root для штатной песочницы) с прогоном scorecard изнутри; раскладка
+ЙЦУКЕН для XTest; прогрев профилей; воркер‑контексты (OOPIF/Service Worker);
+`connect()` к уже запущенному Chrome для модели «браузер отдельно».
 
 Сравнение стеков, на основании которого принято решение (библиотека + MCP,
 десктоп + сервер):

@@ -255,7 +255,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_launch_options(open_)
     open_.add_argument("url", nargs="?")
     open_.set_defaults(func=lambda a: asyncio.run(_run_open(a)))
+
+    mcp = sub.add_parser(
+        "mcp",
+        help="run the MCP server for AI agents (needs the 'mcp' extra)",
+        add_help=False,
+    )
+    mcp.add_argument("mcp_args", nargs=argparse.REMAINDER)
+    mcp.set_defaults(func=_run_mcp)
     return parser
+
+
+def _run_mcp(args: argparse.Namespace) -> int:
+    # Imported lazily: the MCP SDK is an optional extra.
+    from disguisebrowser.mcp_server import main as mcp_main  # noqa: PLC0415
+
+    return mcp_main(args.mcp_args)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
