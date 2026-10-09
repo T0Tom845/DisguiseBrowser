@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Runtime.enable leak probe</title></head>
+<body>
+<p>Logs an Error whose <code>stack</code> getter records whether anyone read it.
+With <code>Runtime.enable</code> active the inspector serializes console arguments
+and trips the getter — the technique used by Cloudflare/DataDome.</p>
+<script>
+  window.__leak = { stackReads: 0, logs: 0 };
+  const probe = new Error('probe');
+  Object.defineProperty(probe, 'stack', {
+    get() { window.__leak.stackReads += 1; return 'probe'; },
+  });
+  setInterval(() => { console.debug(probe); window.__leak.logs += 1; }, 40);
+</script>
+</body>
+</html>

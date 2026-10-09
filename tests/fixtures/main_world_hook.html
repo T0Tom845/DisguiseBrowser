@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Main-world hook probe</title></head>
+<body>
+<div class="item">one</div>
+<div class="item">two</div>
+<p>Hooks <code>Document.prototype.getElementsByClassName</code> in the page's own
+(main) world and records the call stack of every caller, like rebrowser's
+<code>mainWorldExecution</code> test. Calls from an isolated world never reach
+this hook because isolated worlds have their own DOM wrappers.</p>
+<script>
+  window.__calls = [];
+  const original = Document.prototype.getElementsByClassName;
+  Document.prototype.getElementsByClassName = function (...args) {
+    window.__calls.push(String(new Error().stack));
+    return original.apply(this, args);
+  };
+</script>
+</body>
+</html>

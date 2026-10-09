@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Interaction fixture</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  .spacer { height: 1800px; background: linear-gradient(#fff, #eee); }
+  #target { margin: 20px; padding: 14px 28px; font-size: 18px; }
+  #late { display: none; }
+</style>
+</head>
+<body>
+<h1 id="title">Interaction fixture</h1>
+<label>Query <input id="query" type="text" autocomplete="off"></label>
+<p id="status">idle</p>
+<div class="spacer"></div>
+<button id="target">Click me</button>
+<div class="spacer"></div>
+<script>
+  window.__events = { clicks: [], moves: 0, wheels: 0, keys: [] };
+  document.addEventListener('mousemove', () => { window.__events.moves += 1; });
+  document.addEventListener('wheel', () => { window.__events.wheels += 1; });
+  document.getElementById('target').addEventListener('click', (e) => {
+    window.__events.clicks.push({
+      isTrusted: e.isTrusted, x: e.clientX, y: e.clientY, button: e.button,
+      screenX: e.screenX, screenY: e.screenY,
+    });
+    document.getElementById('status').textContent = 'clicked';
+  });
+  const input = document.getElementById('query');
+  input.addEventListener('keydown', (e) => {
+    window.__events.keys.push({ key: e.key, code: e.code, isTrusted: e.isTrusted });
+  });
+  setTimeout(() => {
+    const late = document.createElement('div');
+    late.id = 'late';
+    late.textContent = 'late element';
+    late.style.display = 'block';
+    document.body.appendChild(late);
+  }, 600);
+</script>
+</body>
+</html>
