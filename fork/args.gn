@@ -1,0 +1,33 @@
+# GN args for the DisguiseBrowser Chromium build on a 16-thread / 15 GB RAM host
+# (docs/FORK_PLAN.md, section 7). Unofficial configuration: no ThinLTO, no PGO,
+# no symbols — the official link step needs 20-30 GB of RAM and would OOM here.
+# Everything a page can observe is unaffected by these choices except raw JS
+# throughput, which only microbenchmarks can tell apart.
+
+target_os = "linux"
+target_cpu = "x64"
+
+is_debug = false
+is_official_build = false
+is_component_build = false
+dcheck_always_on = false
+
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+
+use_thin_lto = false
+chrome_pgo_phase = 0
+use_remoteexec = false
+
+# One link at a time: linking chrome is what peaks memory.
+concurrent_links = 1
+
+# Google Chrome parity (G1): proprietary codecs and the Widevine hook are what
+# separate a plain Chromium build from Chrome before any patch is applied.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+enable_widevine = true
+
+enable_nacl = false
+treat_warnings_as_errors = false

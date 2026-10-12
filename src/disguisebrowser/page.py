@@ -22,6 +22,7 @@ from disguisebrowser.errors import (
     NavigationError,
 )
 from disguisebrowser.input import PRESETS, HumanProfile, Keyboard, Mouse
+from disguisebrowser.protocols import WaitUntil, World
 from disguisebrowser.snapshot import Snapshot, format_ax_tree
 
 if TYPE_CHECKING:
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
-World = Literal["isolated", "main"]
 _LIFECYCLE_NAMES: dict[str, str] = {
     "commit": "init",
     "domcontentloaded": "DOMContentLoaded",
@@ -106,12 +105,18 @@ class Page:
         self._context_id: int | None = None
         self._viewport: tuple[int, int] | None = None
         self._origin: tuple[float, float, float] | None = None
+        self._origin_calibrated = False
+        self._probe_installed = False
+        self._calibration_attempts = 0
+        self._child_target_ids: set[str] = set()
         self._refs: dict[str, int] = {}
         self._closed = False
         self.dialog_action: Literal["dismiss", "accept"] = "dismiss"
         backend = browser._input_backend(self, session)
         self.mouse = Mouse(backend, profile=human, rng=self._rng, viewport=self._viewport_hint)
-        self.keyboard = Keyboard(backend, profile=human, rng=self._rng)
+        self.keyboard = Keyboard(
+            backend, profile=human, rng=self._rng, layout=browser.persona.keyboard_layout()
+        )
 
     # ------------------------------------------------------------------ lifecycle
     async def _initialize(self) -> None:
@@ -126,10 +131,27 @@ class Page:
         s.on("Page.navigatedWithinDocument", self._on_navigated_within_document)
         s.on("Page.lifecycleEvent", self._on_lifecycle)
         s.on("Page.javascriptDialogOpening", self._on_dialog)
+        # Dedicated workers and out-of-process iframes are children of the page
+        # target: only a page-level auto-attach reports them (the browser-level
+        # one covers tabs, service workers and extension pages). The resulting
+        # Target.* events reach the browser's handlers via the root session; here
+        # we only remember which children belong to this tab.
+        s.on("Target.attachedToTarget", self._on_child_attached)
+        s.on("Target.detachedFromTarget", self._on_child_detached)
+        await s.send(
+            "Target.setAutoAttach",
+            {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True},
+        )
         await s.send("Runtime.runIfWaitingForDebugger")
         # A freshly opened tab is the one the user looks at: without this,
         # document.hasFocus() stays false on a bare virtual display.
         await self.activate()
+
+    def _on_child_attached(self, params: dict[str, Any]) -> None:
+        self._child_target_ids.add(params["targetInfo"]["targetId"])
+
+    def _on_child_detached(self, params: dict[str, Any]) -> None:
+        self._child_target_ids.discard(params.get("targetId", ""))
 
     def _on_frame_navigated(self, params: dict[str, Any]) -> None:
         frame = params.get("frame", {})
@@ -160,15 +182,27 @@ class Page:
         self._context_id = None
         self._viewport = None
         self._origin = None
+        self._origin_calibrated = False
+        self._probe_installed = False
+        self._calibration_attempts = 0
 
     @property
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def rng(self) -> random.Random:
+        """Deterministic when the persona has a seed; shared with the humanizer."""
+        return self._rng
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        closer = getattr(self.mouse._backend, "close", None)
+        if closer is not None:
+            with contextlib.suppress(Exception):
+                closer()
         await self.browser._close_page(self)
 
     # ------------------------------------------------------------------ navigation
@@ -245,6 +279,23 @@ class Page:
         """
         if self.browser._active_page is not self:
             await self.bring_to_front()
+            await self._wait_focus()
+
+    async def _wait_focus(self, timeout: float = 1.5) -> None:
+        """Give the window manager time to hand focus to a freshly mapped window.
+
+        OS-level input is delivered to whatever X window has focus; on a
+        virtual desktop the first keystrokes after launch would otherwise race
+        the window manager.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            with contextlib.suppress(Exception):
+                if await self.evaluate("document.hasFocus()"):
+                    return
+            await asyncio.sleep(0.05)
+        log.debug("page %s did not report focus within %.1fs", self.target_id, timeout)
 
     # ------------------------------------------------------------------ evaluation
     async def _context(self) -> int:
@@ -455,6 +506,44 @@ class Page:
         await asyncio.wait_for(future, timeout)
         return True
 
+    async def frames(self) -> list[dict[str, str | None]]:
+        """Every frame in this tab, including same-process and out-of-process iframes."""
+        tree = await self.session.send("Page.getFrameTree")
+        found: list[dict[str, str | None]] = []
+
+        def walk(node: dict[str, Any]) -> None:
+            frame = node.get("frame", {})
+            found.append(
+                {
+                    "id": frame.get("id", ""),
+                    "url": frame.get("url", ""),
+                    "name": frame.get("name") or "",
+                    "parent_id": frame.get("parentId"),
+                }
+            )
+            for child in node.get("childFrames", []):
+                walk(child)
+
+        walk(tree.get("frameTree", {}))
+        # Out-of-process iframes are separate targets and are absent from the
+        # parent's tree once attached; add the ones that belong to this tab.
+        listed = {frame["id"] for frame in found}
+        for target in self.browser.targets:
+            if (
+                target.type == "iframe"
+                and target.target_id in self._child_target_ids
+                and target.target_id not in listed
+            ):
+                found.append(
+                    {
+                        "id": target.target_id,
+                        "url": target.url,
+                        "name": "",
+                        "parent_id": self._main_frame_id,
+                    }
+                )
+        return found
+
     async def content(self) -> str:
         return str(await self.evaluate("document.documentElement.outerHTML"))
 
@@ -496,6 +585,10 @@ class Page:
         """Screen position of the viewport's top-left corner and the DPR.
 
         Used by OS-level input to translate CSS coordinates into screen pixels.
+        This is an estimate from window geometry; it assumes every decoration
+        above the viewport and none below. Window managers with a bottom frame
+        break that, so the XTest backend refines it with
+        :meth:`_calibrate_origin` from a real pointer event.
         """
         if self._origin is None:
             v = await self.evaluate(
@@ -505,6 +598,68 @@ class Page:
             sx, sy, ow, iw, oh, ih, dpr = (float(n) for n in v)
             self._origin = (sx + (ow - iw) / 2, sy + (oh - ih), dpr)
         return self._origin
+
+    async def _install_pointer_probe(self) -> None:
+        """Remember the last pointer move in the isolated world.
+
+        The isolated world shares the DOM, so the listener sees real events,
+        but its global object is invisible to page scripts.
+        """
+        if self._probe_installed:
+            return
+        await self.call(
+            """() => {
+                if (!globalThis.__dbMove) {
+                    globalThis.__dbMove = { seq: 0 };
+                    document.addEventListener('mousemove', (e) => {
+                        globalThis.__dbMove = {
+                            seq: globalThis.__dbMove.seq + 1,
+                            x: e.clientX, y: e.clientY, sx: e.screenX, sy: e.screenY,
+                        };
+                    }, true);
+                }
+                return true;
+            }"""
+        )
+        self._probe_installed = True
+
+    async def _calibrate_origin(
+        self, screen: tuple[int, int], *, timeout: float = 0.25, tolerance: float = 8.0
+    ) -> bool:
+        """Refine the origin from the move Chrome received for XTest point ``screen``.
+
+        Only an event whose ``screenX/Y`` match the requested point is accepted:
+        Chrome also synthesizes moves for the previous pointer position on
+        focus and layout changes, and the first path point may lie outside the
+        viewport. Returns ``True`` once calibrated.
+        """
+        if self._origin is None:
+            return False
+        estimate = self._origin
+        dpr = estimate[2]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(0.02)
+            move = await self.evaluate("globalThis.__dbMove")
+            if (
+                move
+                and "sx" in move
+                and abs(float(move["sx"]) - screen[0] / dpr) <= tolerance
+                and abs(float(move["sy"]) - screen[1] / dpr) <= tolerance
+            ):
+                self._origin = (
+                    screen[0] - float(move["x"]) * dpr,
+                    screen[1] - float(move["y"]) * dpr,
+                    dpr,
+                )
+                self._origin_calibrated = True
+                log.debug(
+                    "pointer calibration: estimate %s → measured %s (xtest %s, event %s)",
+                    estimate[:2], self._origin[:2], screen, move,
+                )  # fmt: skip
+                return True
+        return False
 
     # ------------------------------------------------------------------ interaction
     async def _require(self, selector: str, timeout: float) -> ElementHandle:

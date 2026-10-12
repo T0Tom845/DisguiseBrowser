@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DisguiseBrowser fingerprint capture</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 24px; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  #status { font-weight: 600; margin: 8px 0; }
+  #insecure { background: #fff3cd; border: 1px solid #e0b400; padding: 8px 12px; margin: 8px 0; }
+  pre { background: #f6f6f6; border: 1px solid #ddd; padding: 8px; max-height: 60vh; overflow: auto; font-size: 11px; }
+  button, a { margin-right: 12px; }
+</style>
+</head>
+<body>
+<h1>DisguiseBrowser fingerprint capture</h1>
+<p>Collects what a page can observe about this browser and device. Nothing identifies you personally; the result is stored as a reference device profile.</p>
+<div id="insecure" hidden>
+  This page is not a secure context, so <code>navigator.userAgentData</code>, WebGPU, media devices and
+  <code>Accept-CH</code> headers are unavailable. Open it as <code>http://localhost:&lt;port&gt;/</code>
+  (for a remote machine: <code>ssh -L &lt;port&gt;:127.0.0.1:&lt;port&gt; host</code>, then open localhost).
+</div>
+<p id="status">Loading…</p>
+<p>
+  <button id="local-fonts" hidden>Add local font list (asks for permission)</button>
+  <a id="download" hidden>Download JSON</a>
+</p>
+<pre id="out"></pre>
+<script id="nav-headers" type="application/json">__NAV_HEADERS__</script>
+<script src="capture.js"></script>
+</body>
+</html>

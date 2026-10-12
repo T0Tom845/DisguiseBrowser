@@ -88,6 +88,8 @@ class Persona:
     gpu: GpuIdentity | None = None
     proxy: str | None = None
     seed: int | None = None
+    # ``None`` derives ``us,ru`` when a language tag starts with ``ru``, else ``us``.
+    keyboard: str | None = None
 
     # ------------------------------------------------------------------ factories
     @classmethod
@@ -104,6 +106,14 @@ class Persona:
     @property
     def primary_language(self) -> str:
         return self.languages[0]
+
+    def keyboard_layout(self) -> str:
+        """XKB layout for the virtual display: ``us`` or ``us,ru`` (ЙЦУКЕН on group 2)."""
+        if self.keyboard:
+            return self.keyboard
+        if any(tag.split("-", maxsplit=1)[0].lower() == "ru" for tag in self.languages):
+            return "us,ru"
+        return "us"
 
     def rng(self, salt: str = "") -> random.Random:
         """Deterministic RNG when ``seed`` is set (same profile → same geometry)."""
@@ -162,6 +172,8 @@ class Persona:
                 f"window {window.width}x{window.height}@{window.x},{window.y} does not fit "
                 f"the {self.screen.width}x{self.screen.height} screen"
             )
+        if self.keyboard is not None and self.keyboard not in {"us", "us,ru"}:
+            problems.append(f"keyboard must be 'us' or 'us,ru', got {self.keyboard!r}")
         if self.proxy:
             try:
                 scheme, *_ = self.proxy_parts() or ("",)
@@ -208,24 +220,34 @@ def _posix_locale_to_tag(value: str) -> str | None:
     return f"{lang}-{region.upper()}" if region else lang
 
 
+_UTC_ALIASES = frozenset({"Etc/UTC", "Etc/GMT", "GMT", "Etc/Universal", "Universal", "Zulu"})
+
+
+def _canonical_timezone(name: str) -> str | None:
+    """IANA name as Chrome's ICU reports it (``Etc/UTC`` → ``UTC``)."""
+    if name in _UTC_ALIASES:
+        return "UTC"
+    return name if name in available_timezones() else None
+
+
 def detect_timezone(environ: dict[str, str] | None = None) -> str | None:
     env = os.environ if environ is None else environ
     tz = env.get("TZ", "").lstrip(":")
-    if tz and tz in available_timezones():
-        return tz
+    if tz and (found := _canonical_timezone(tz)):
+        return found
     etc_timezone = Path("/etc/timezone")
     if etc_timezone.is_file():
-        name = etc_timezone.read_text().strip()
-        if name in available_timezones():
-            return name
+        found = _canonical_timezone(etc_timezone.read_text().strip())
+        if found:
+            return found
     localtime = Path("/etc/localtime")
     if localtime.is_symlink():
         target = os.path.realpath(localtime)
         marker = "/zoneinfo/"
         if marker in target:
-            name = target.split(marker, 1)[1]
-            if name in available_timezones():
-                return name
+            found = _canonical_timezone(target.split(marker, 1)[1])
+            if found:
+                return found
     return None
 
 

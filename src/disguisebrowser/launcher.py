@@ -80,6 +80,21 @@ def chrome_version(executable: Path) -> str:
     return match.group(1)
 
 
+def headless_extra_args(persona: Persona, version: str) -> list[str]:
+    """Flags that keep an explicit headless session from looking like the 800x600 default.
+
+    The UA still has to be overridden: headless Chrome 15x appends ``Headless`` to
+    it, including inside workers. Screen size is set with ``--screen-info`` so it
+    matches the persona instead of the headless default.
+    """
+    screen = persona.screen
+    return [
+        "--headless=new",
+        f"--user-agent={headless_user_agent(version)}",
+        f"--screen-info={screen.width}x{screen.height}",
+    ]
+
+
 def headless_user_agent(version: str) -> str:
     """UA a real Linux Chrome of this major version sends (headless adds 'Headless')."""
     major = version.split(".", maxsplit=1)[0]
@@ -119,8 +134,7 @@ def build_args(config: LaunchConfig) -> list[str]:
     if config.proxy_server:
         args.append(f"--proxy-server={config.proxy_server}")
     if config.headless:
-        args.append("--headless=new")
-        args.append(f"--user-agent={headless_user_agent(chrome_version(config.executable))}")
+        args.extend(headless_extra_args(persona, chrome_version(config.executable)))
     args.extend(config.extra_args)
     args.append(config.initial_url)
     return args
@@ -181,6 +195,20 @@ def free_port() -> int:
         sock.bind(("127.0.0.1", 0))
         port: int = sock.getsockname()[1]
         return port
+
+
+@dataclass
+class AttachedChrome:
+    """A Chrome this process did not start and must not stop."""
+
+    port: int
+    ws_url: str
+    user_data_dir: Path
+    temporary_profile: bool = False
+    stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=1))
+
+    async def terminate(self, grace: float = 5.0) -> None:
+        return
 
 
 @dataclass

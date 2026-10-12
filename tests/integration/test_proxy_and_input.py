@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 
@@ -65,6 +66,34 @@ async def test_geoip_aligns_timezone_and_languages(fixture_server: str) -> None:
         await upstream.stop()
 
 
+async def test_jcuken_is_typed_with_real_keys_on_the_virtual_display(fixture_server: str) -> None:
+    if not shutil.which("Xvfb") or not shutil.which("setxkbmap"):
+        pytest.skip("needs Xvfb and setxkbmap")
+    persona = Persona.from_host(languages=("ru-RU", "ru", "en-US", "en"), seed=3)
+    async with launch(persona=persona, display="virtual", input="xtest", human="fast") as browser:
+        assert browser.persona.keyboard_layout() == "us,ru"
+        page = await browser.new_page(f"{fixture_server}/interaction.html")
+        await page.type("#query", "йЦ1 ok", humanize=False)
+        assert await (await page.query("#query")).value() == "йЦ1 ok"  # type: ignore[union-attr]
+        events = await page.evaluate("window.__events", world="main")
+        keys = [(k["key"], k["code"]) for k in events["keys"] if k["key"] != "Shift"]
+        assert keys[:3] == [("й", "KeyQ"), ("Ц", "KeyW"), ("1", "Digit1")], keys
+        assert all(k["isTrusted"] for k in events["keys"])
+
+
+async def test_without_ru_layout_cyrillic_falls_back_to_insert_text(fixture_server: str) -> None:
+    if not shutil.which("Xvfb"):
+        pytest.skip("needs Xvfb")
+    persona = Persona.from_host(languages=("ru-RU", "ru"), keyboard="us", seed=3)
+    async with launch(persona=persona, display="virtual", input="xtest", human="fast") as browser:
+        page = await browser.new_page(f"{fixture_server}/interaction.html")
+        await page.type("#query", "я1", humanize=False)
+        assert await (await page.query("#query")).value() == "я1"  # type: ignore[union-attr]
+        events = await page.evaluate("window.__events", world="main")
+        # insertText commits the character without a keydown; the digit is a real key.
+        assert [k["key"] for k in events["keys"]] == ["1"]
+
+
 async def test_xtest_click_has_real_screen_coordinates(
     browser: Browser, fixture_server: str
 ) -> None:
@@ -78,9 +107,16 @@ async def test_xtest_click_has_real_screen_coordinates(
         assert click["isTrusted"] is True
         # Real pointer events are reported relative to the screen, not the page.
         assert (click["screenX"], click["screenY"]) != (click["x"], click["y"])
-        origin_x, origin_y, _ = await page._content_origin()
-        assert abs(click["screenX"] - (click["x"] + origin_x)) <= 2
-        assert abs(click["screenY"] - (click["y"] + origin_y)) <= 2
+        # The click must land inside the button regardless of window-manager frames.
+        box = await (await page.query("#target")).bounding_box()  # type: ignore[union-attr]
+        assert box is not None
+        assert box["x"] <= click["x"] <= box["x"] + box["width"], (click, box)
+        assert box["y"] <= click["y"] <= box["y"] + box["height"], (click, box)
+        # Calibrated origin: an explicit move lands exactly where asked.
+        await page.mouse.move(300, 200, humanize=False)
+        await asyncio.sleep(0.2)
+        last = (await page.evaluate("window.__events", world="main"))["lastMove"]
+        assert abs(last["x"] - 300) <= 1 and abs(last["y"] - 200) <= 1, last
         # A physical mouse reports pressure 0.5 while a button is held
         # (Pointer Events spec); CDP-synthesized events report 0.
         assert events["lastPointerDown"]["pressure"] == 0.5

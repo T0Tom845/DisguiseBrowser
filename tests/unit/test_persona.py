@@ -23,11 +23,17 @@ def test_detect_languages_from_posix_locale() -> None:
 def test_detect_timezone_prefers_tz_env() -> None:
     assert detect_timezone({"TZ": "Europe/Berlin"}) == "Europe/Berlin"
     assert detect_timezone({"TZ": ":Asia/Tokyo"}) == "Asia/Tokyo"
+    # ICU reports Etc/UTC as UTC; the persona must match what the page will see.
+    assert detect_timezone({"TZ": "Etc/UTC"}) == "UTC"
 
 
 def test_validate_accepts_sane_persona() -> None:
     persona = Persona(languages=("ru-RU", "ru"), timezone="Europe/Moscow")
     assert persona.validate() == []
+    assert persona.keyboard_layout() == "us,ru"
+    assert Persona(languages=("en-US", "en")).keyboard_layout() == "us"
+    assert Persona(keyboard="us").keyboard_layout() == "us"
+    assert any("keyboard" in problem for problem in Persona(keyboard="de").validate())
 
 
 def test_validate_rejects_bad_values() -> None:

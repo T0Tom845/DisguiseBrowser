@@ -211,10 +211,12 @@ class Keyboard:
         *,
         profile: HumanProfile = PRESETS["default"],
         rng: random.Random | None = None,
+        layout: str = "us",
     ) -> None:
         self._backend = backend
         self.profile = profile
         self._rng = rng or random.Random()
+        self.layout = layout
         self._modifiers = 0
 
     _MODIFIER_BITS: ClassVar[dict[str, int]] = {
@@ -225,18 +227,18 @@ class Keyboard:
     }
 
     async def down(self, key: str) -> None:
-        definition = keymap.definition_for_name(key)
+        definition = keymap.definition_for_name(key, layout=self.layout)
         self._modifiers |= self._MODIFIER_BITS.get(key, 0)
         await self._backend.key(True, definition, self._modifiers)
 
     async def up(self, key: str) -> None:
-        definition = keymap.definition_for_name(key)
+        definition = keymap.definition_for_name(key, layout=self.layout)
         self._modifiers &= ~self._MODIFIER_BITS.get(key, 0)
         await self._backend.key(False, definition, self._modifiers)
 
     async def press(self, key: str, *, humanize: bool = True) -> None:
         """Press and release a named key (``Enter``, ``Tab``, ``ArrowDown`` …) or a character."""
-        definition = keymap.definition_for_name(key)
+        definition = keymap.definition_for_name(key, layout=self.layout)
         if definition.shift:
             await self.down("Shift")
         await self._backend.key(True, definition, self._modifiers)
@@ -252,13 +254,14 @@ class Keyboard:
     async def type(self, text: str, *, humanize: bool = True) -> None:
         """Type ``text`` character by character with human inter-key timing.
 
-        Characters without a US-layout key (e.g. Cyrillic) are committed through
-        ``Input.insertText`` — the same path an IME or a non-US layout takes.
+        Characters the active layout has no key for are committed through
+        ``Input.insertText`` — the same path an IME takes. Cyrillic is a real
+        key when ``layout`` includes ``ru`` (ЙЦУКЕН on the virtual display).
         """
         delays = typing_delays(text, rng=self._rng, profile=self.profile)
         for char, delay in zip(text, delays, strict=True):
             await _sleep_ms(delay if humanize else 0)
-            if keymap.definition_for_char(char) is None:
+            if keymap.definition_for_char(char, layout=self.layout) is None:
                 await self.insert_text(char)
             else:
                 await self.press(char, humanize=humanize)

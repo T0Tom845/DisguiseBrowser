@@ -31,28 +31,34 @@ except ImportError as exc:  # pragma: no cover - exercised only without the extr
     ) from exc
 
 from disguisebrowser import __version__
-from disguisebrowser.browser import Browser, launch
+from disguisebrowser.browser import connect, launch
+from disguisebrowser.camoufox.profiles import OSES, ProfileError, ProfileStore
 from disguisebrowser.errors import DisguiseError
-from disguisebrowser.page import ElementHandle, Page
 from disguisebrowser.persona import GPU_PRESETS, Persona
+from disguisebrowser.protocols import BrowserLike, ElementLike, PageLike
 
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS = """\
-DisguiseBrowser drives a real, stealth Google Chrome. Workflow:
+DisguiseBrowser drives a stealth browser: real Google Chrome (engine="chrome", default) or
+Camoufox, a Firefox build (engine="camoufox"). Workflow:
 1. browser_launch → session_id (one call per independent browser; several may run at once).
+   For a persistent, pinned identity use engine="camoufox" with a profile name
+   (profile_create / profile_list first, or create=true on launch).
 2. navigate(session_id, url), then snapshot(session_id) to read the page as an
    accessibility tree with [ref=eN] handles.
 3. click / type_text / press_key / scroll with a ref (e.g. "e12") or a CSS selector.
 4. extract_text / get_html / screenshot for content; wait_for before reading dynamic pages.
-5. browser_close when done. Interactions are humanized and may take a second or two.
+5. warmup(session_id) once on a fresh profile, before the target site.
+6. browser_close when done. Interactions are humanized and may take a second or two.
+   browser_connect attaches to a Chrome that is already running and does not close it.
 """
 
 
 @dataclass
 class _Session:
-    browser: Browser
-    current: Page
+    browser: BrowserLike
+    current: PageLike
     label: str = ""
 
 
@@ -70,7 +76,7 @@ class BrowserSessions:
                 f"unknown session {session_id!r}; call browser_launch first"
             ) from None
 
-    async def page(self, session_id: str) -> Page:
+    async def page(self, session_id: str) -> PageLike:
         session = self.get(session_id)
         if session.current.closed:
             pages = session.browser.pages
@@ -86,7 +92,7 @@ class BrowserSessions:
         await asyncio.gather(*(s.browser.close() for s in sessions), return_exceptions=True)
 
 
-async def _resolve_target(page: Page, target: str, timeout: float = 15.0) -> ElementHandle:
+async def _resolve_target(page: PageLike, target: str, timeout: float = 15.0) -> ElementLike:
     if target.startswith("e") and target[1:].isdigit():
         return await page.element_by_ref(target)
     handle = await page.wait_for_selector(target, timeout=timeout, state="attached")
@@ -120,7 +126,11 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
 
         return register
 
-    @tool(description="Start an independent stealth browser; returns its session_id.")
+    @tool(
+        description="Start an independent stealth browser; returns its session_id. "
+        "engine='camoufox' (Firefox) takes profile (a stored identity name) instead of "
+        "profile_dir and ignores gpu/seed: the device comes from the profile."
+    )
     async def browser_launch(  # noqa: PLR0917 — MCP tool parameters are keyword arguments
         label: str = "",
         proxy: str | None = None,
@@ -132,31 +142,62 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
         human: Literal["default", "careful", "fast"] = "default",
         display: Literal["auto", "host", "virtual"] = "auto",
         seed: int | None = None,
+        engine: Literal["chrome", "camoufox"] = "chrome",
+        profile: str | None = None,
+        create: bool = False,
+        os: Literal["windows", "macos", "linux"] | None = None,
     ) -> dict[str, Any]:
         overrides: dict[str, Any] = {}
-        if proxy:
-            overrides["proxy"] = proxy
         if timezone:
             overrides["timezone"] = timezone
         if languages:
             overrides["languages"] = tuple(part.strip() for part in languages.split(","))
-        if gpu:
-            if gpu not in GPU_PRESETS:
-                raise DisguiseError(f"unknown gpu preset {gpu!r}; one of {sorted(GPU_PRESETS)}")
-            overrides["gpu"] = GPU_PRESETS[gpu]
-        if seed is not None:
-            overrides["seed"] = seed
-        persona = Persona.from_host(**overrides)
-        browser = await launch(
-            persona=persona, display=display, user_data_dir=profile_dir, human=human, geoip=geoip
-        )
+        browser: BrowserLike
+        if engine == "camoufox":
+            if gpu or seed is not None or profile_dir:
+                raise DisguiseError(
+                    "gpu, seed and profile_dir are chrome options; for camoufox pass a "
+                    "profile (see profile_create)"
+                )
+            from disguisebrowser.camoufox import launch as camoufox_launch  # noqa: PLC0415
+
+            browser = await camoufox_launch(
+                profile=profile,
+                create=create,
+                os=os,
+                persona=Persona.from_host(**overrides) if overrides else None,
+                proxy=proxy,
+                geoip=True if geoip else None,
+                human=human,
+                display=display,
+            )
+        else:
+            if profile or create or os:
+                raise DisguiseError("profile, create and os apply to engine='camoufox' only")
+            if proxy:
+                overrides["proxy"] = proxy
+            if gpu:
+                if gpu not in GPU_PRESETS:
+                    raise DisguiseError(f"unknown gpu preset {gpu!r}; one of {sorted(GPU_PRESETS)}")
+                overrides["gpu"] = GPU_PRESETS[gpu]
+            if seed is not None:
+                overrides["seed"] = seed
+            browser = await launch(
+                persona=Persona.from_host(**overrides),
+                display=display,
+                user_data_dir=profile_dir,
+                human=human,
+                geoip=geoip,
+            )
         session_id = secrets.token_hex(4)
         page = browser.pages[0] if browser.pages else await browser.new_page()
         registry.sessions[session_id] = _Session(browser, page, label)
-        return {
+        info: dict[str, Any] = {
             "session_id": session_id,
-            "chrome": browser.version.get("product"),
-            "display": browser.display.display if browser.display else "host",
+            "engine": browser.engine,
+            "browser": browser.version.get("product"),
+            "display": getattr(browser, "display_mode", None)
+            or (browser.display.display if browser.display else "host"),
             "input": browser.input_mode,
             "timezone": browser.persona.timezone,
             "languages": list(browser.persona.languages),
@@ -165,6 +206,79 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
             else None,
             "exit_ip": browser.geo.ip if browser.geo else None,
         }
+        if engine == "chrome":
+            info["chrome"] = info["browser"]  # key kept for existing clients
+        else:
+            stored = getattr(browser, "profile", None)
+            info["profile"] = stored.name if stored else None
+        return info
+
+    @tool(description="List stored Camoufox identities (profiles) with their pinned devices.")
+    async def profile_list() -> list[dict[str, Any]]:
+        return [p.summary() for p in ProfileStore().list()]
+
+    @tool(
+        description="Create a persistent Camoufox identity: a pinned device plus its own "
+        "cookies and storage. Launch it later with "
+        "browser_launch(engine='camoufox', profile=name). Deleting profiles is CLI-only."
+    )
+    async def profile_create(  # noqa: PLR0917 — MCP tool parameters are keyword arguments
+        name: str,
+        os: Literal["windows", "macos", "linux"] | None = None,
+        proxy: str | None = None,
+        geoip: bool = False,
+        languages: str | None = None,
+        timezone: str | None = None,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        if os is not None and os not in OSES:
+            raise DisguiseError(f"os must be one of {', '.join(OSES)}")
+        try:
+            profile = ProfileStore().create(
+                name,
+                os=os,
+                proxy=proxy,
+                geoip=geoip,
+                languages=tuple(p.strip() for p in languages.split(",")) if languages else None,
+                timezone=timezone,
+                notes=notes,
+            )
+        except ProfileError as exc:
+            raise DisguiseError(str(exc)) from None
+        return profile.summary()
+
+    @tool(
+        description="Attach to a Chrome already listening on a loopback DevTools port. "
+        "Closing the session disconnects only; it does not stop that Chrome."
+    )
+    async def browser_connect(port: int, label: str = "") -> dict[str, Any]:
+        browser = await connect(port=port)
+        session_id = secrets.token_hex(4)
+        page = browser.pages[0] if browser.pages else await browser.new_page()
+        registry.sessions[session_id] = _Session(browser, page, label)
+        return {
+            "session_id": session_id,
+            "engine": browser.engine,
+            "chrome": browser.version.get("product"),
+            "attached": True,
+            "pages": len(browser.pages),
+        }
+
+    @tool(
+        description=(
+            "Visit ordinary sites so a fresh profile gains history, cache and cookies. "
+            "Pass urls to override the built-in list."
+        )
+    )
+    async def warmup(
+        session_id: str, urls: list[str] | None = None, count: int = 3
+    ) -> list[dict[str, Any]]:
+        session = registry.get(session_id)
+        visits = await session.browser.warmup(urls=urls, count=count)
+        return [
+            {"url": visit.url, "ok": visit.ok, "title": visit.title, "error": visit.error}
+            for visit in visits
+        ]
 
     @tool(description="Close a browser session and free its resources.")
     async def browser_close(session_id: str) -> str:
@@ -180,6 +294,7 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
             {
                 "session_id": sid,
                 "label": s.label,
+                "engine": s.browser.engine,
                 "tabs": len(s.browser.pages),
                 "url": s.current.url,
                 "proxy": bool(s.browser.gateway),

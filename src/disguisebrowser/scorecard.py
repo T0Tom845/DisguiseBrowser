@@ -10,17 +10,17 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from disguisebrowser.page import Page
+from disguisebrowser.protocols import PageLike
 
 log = logging.getLogger(__name__)
 
 Verdict = Literal["pass", "warn", "fail", "unknown"]
 Judge = Callable[[Any], tuple[Verdict, str]]
-Interact = Callable[[Page], Awaitable[None]]
+Interact = Callable[[PageLike], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,9 @@ class Detector:
     settle_seconds: float = 4.0
     interact: Interact | None = None
     description: str = ""
+    waive: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    """Per engine: substrings of failed rows that cannot apply to that engine
+    (``window.chrome`` on Firefox). They are reported as waived, not as failures."""
 
 
 @dataclass
@@ -52,9 +55,11 @@ def _judge_sannysoft(raw: Any) -> tuple[Verdict, str]:
     total = raw.get("total", 0) if isinstance(raw, dict) else 0
     if not total:
         return "unknown", "results table not found"
+    waived = raw.get("waived", []) if isinstance(raw, dict) else []
+    note = f" ({len(waived)} {'check' if len(waived) == 1 else 'checks'} n/a for this engine)"
     if not failed:
-        return "pass", f"0 of {total} checks failed"
-    return "fail", f"{len(failed)} failed: " + "; ".join(failed[:6])
+        return "pass", f"0 of {total} checks failed" + (note if waived else "")
+    return "fail", f"{len(failed)} failed: " + "; ".join(failed[:6]) + (note if waived else "")
 
 
 def _judge_rebrowser(raw: Any) -> tuple[Verdict, str]:
@@ -97,7 +102,7 @@ def _judge_tls(raw: Any) -> tuple[Verdict, str]:
 
 
 # ---------------------------------------------------------------------- interactions
-async def _rebrowser_interact(page: Page) -> None:
+async def _rebrowser_interact(page: PageLike) -> None:
     # Trigger the tests the way our library really works: DOM calls from the
     # isolated world. A main-world driver would light up 'mainWorldExecution'.
     await page.call(
@@ -124,6 +129,7 @@ DETECTORS: tuple[Detector, ...] = (
             return { total: rows.length, failed: rows.filter(Boolean) };
         }""",
         judge=_judge_sannysoft,
+        waive={"camoufox": ("Chrome (New)",)},
     ),
     Detector(
         name="rebrowser",
@@ -185,7 +191,24 @@ DETECTORS: tuple[Detector, ...] = (
 )
 
 
-async def run_detector(page: Page, detector: Detector, *, timeout: float = 60.0) -> Result:
+def _apply_waivers(raw: Any, patterns: tuple[str, ...]) -> Any:
+    if not patterns or not isinstance(raw, dict) or not isinstance(raw.get("failed"), list):
+        return raw
+    failed = [row for row in raw["failed"] if not any(p in row for p in patterns)]
+    waived = [row for row in raw["failed"] if row not in failed]
+    if not waived:
+        return raw
+    return {
+        **raw,
+        "failed": failed,
+        "waived": waived,
+        "total": max(raw.get("total", 0) - len(waived), 0),
+    }
+
+
+async def run_detector(
+    page: PageLike, detector: Detector, *, timeout: float = 60.0, engine: str = "chrome"
+) -> Result:
     loop = asyncio.get_running_loop()
     started = loop.time()
     try:
@@ -193,7 +216,7 @@ async def run_detector(page: Page, detector: Detector, *, timeout: float = 60.0)
         await asyncio.sleep(detector.settle_seconds)
         if detector.interact is not None:
             await detector.interact(page)
-        raw = await page.call(detector.extract)
+        raw = _apply_waivers(await page.call(detector.extract), detector.waive.get(engine, ()))
         verdict, summary = detector.judge(raw)
         return Result(
             detector.name, verdict, summary, detector.url, raw=raw, seconds=loop.time() - started
@@ -207,12 +230,16 @@ async def run_detector(page: Page, detector: Detector, *, timeout: float = 60.0)
 
 
 async def run_scorecard(
-    page: Page, detectors: tuple[Detector, ...] = DETECTORS, *, timeout: float = 60.0
+    page: PageLike,
+    detectors: tuple[Detector, ...] = DETECTORS,
+    *,
+    timeout: float = 60.0,
+    engine: str = "chrome",
 ) -> list[Result]:
     results = []
     for detector in detectors:
         log.info("running %s …", detector.name)
-        results.append(await run_detector(page, detector, timeout=timeout))
+        results.append(await run_detector(page, detector, timeout=timeout, engine=engine))
     return results
 
 

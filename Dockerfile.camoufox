@@ -1,0 +1,72 @@
+# DisguiseBrowser with the Camoufox (Firefox) engine and persistent profiles.
+# Unlike the Chrome image this one needs no Google Chrome: Camoufox ships its own
+# browser, fetched at build time into the image user's cache.
+#
+# Build:   docker build -f Dockerfile.camoufox -t disguisebrowser-fox .
+# Check:   docker run --rm disguisebrowser-fox doctor --engine camoufox
+# Profile: docker run --rm -v fox-data:/data disguisebrowser-fox profile create shop-1 --os windows
+# Score:   docker run --rm --shm-size=1g -v fox-data:/data disguisebrowser-fox \
+#              test --engine camoufox --profile shop-1 --display virtual
+#
+# Profiles (identity, cookies, storage) live in /data, keep it on a volume.
+# Camoufox starts its own Xvfb for display=virtual; no window manager is needed.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8 \
+    HOME=/home/disguise \
+    DISGUISE_HOME=/data \
+    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        locales \
+        python3 \
+        python3-venv \
+        xvfb \
+        xauth \
+        libgtk-3-0t64 \
+        libx11-xcb1 \
+        libxt6t64 \
+        libxtst6 \
+        libasound2t64 \
+        libdbus-glib-1-2 \
+        libgl1-mesa-dri \
+        mesa-utils \
+        fonts-liberation \
+        fonts-dejavu-core \
+        fonts-noto-core \
+        fonts-noto-color-emoji \
+        fonts-noto-cjk \
+        fonts-unifont \
+    && sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+RUN python3 -m venv /opt/venv
+WORKDIR /opt/disguisebrowser
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN /opt/venv/bin/pip install --no-cache-dir ".[camoufox,mcp]"
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin disguise \
+    && mkdir -p /data
+
+# The browser build and the GeoIP database go to $HOME/.cache/camoufox; the fpgen
+# device model is stored next to the package inside the venv. Fetch as root (the
+# venv's owner), then hand both to the runtime user, who must be able to write them.
+RUN python -m camoufox fetch \
+    && python -c "from camoufox.fingerprints import generate_fingerprint; generate_fingerprint(os='windows')" \
+    && chown -R disguise:disguise /home/disguise /data \
+    && chown -R disguise:disguise "$(python -c 'import fpgen, pathlib; print(pathlib.Path(fpgen.__file__).parent)')"
+
+USER disguise
+WORKDIR /home/disguise
+
+VOLUME ["/data"]
+ENTRYPOINT ["disguise"]
+CMD ["doctor", "--engine", "camoufox"]

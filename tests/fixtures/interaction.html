@@ -19,7 +19,10 @@
 <div class="spacer"></div>
 <script>
   window.__events = { clicks: [], moves: 0, wheels: 0, keys: [] };
-  document.addEventListener('mousemove', () => { window.__events.moves += 1; });
+  document.addEventListener('mousemove', (e) => {
+    window.__events.moves += 1;
+    window.__events.lastMove = { x: e.clientX, y: e.clientY, screenX: e.screenX, screenY: e.screenY };
+  });
   document.addEventListener('wheel', () => { window.__events.wheels += 1; });
   document.getElementById('target').addEventListener('pointerdown', (e) => {
     window.__events.lastPointerDown = {

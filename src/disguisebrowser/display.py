@@ -42,6 +42,36 @@ WINDOW_MANAGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _START_ATTEMPTS = 5
 _reserved_displays: set[int] = set()
 
+# A bottom bar tall enough for openbox to shrink _NET_WORKAREA. Started only when
+# a window manager is running, because the panel's strut is what the WM publishes.
+_TINT2RC = """\
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 100% 32
+panel_margin = 0 0
+panel_padding = 0 0 2
+panel_dock = 0
+wm_menu = 0
+panel_layer = bottom
+panel_background_id = 1
+rounded = 0
+panel_items = C
+panel_shrink = 0
+
+background 1 {
+    color = #222222 100
+    border_width = 0
+    border_sides = T
+}
+
+clock = 1
+clock_font = sans 9
+clock_font_color = #eeeeee 100
+clock_padding = 2 0
+clock_background_id = 0
+time1_format = %H:%M
+"""
+
 
 class MesaIdentity:
     """Materializes a driconf directory that makes Mesa report the given GPU.
@@ -132,17 +162,20 @@ class VirtualDisplay:
         gpu: GpuIdentity | None = None,
         work_area: Window | None = None,
         window_manager: bool = True,
+        keyboard: str = "us",
         dpi: int = 96,
     ) -> None:
         self.screen = screen
         self.gpu = gpu
         self.work_area = work_area
         self.window_manager = window_manager
+        self.keyboard = keyboard
         self.dpi = dpi
         self.display: str | None = None
         self.number: int | None = None
         self._xvfb: asyncio.subprocess.Process | None = None
         self._wm: asyncio.subprocess.Process | None = None
+        self._panel: asyncio.subprocess.Process | None = None
         self._workdir: Path | None = None
         self._env: dict[str, str] = {}
 
@@ -192,11 +225,16 @@ class VirtualDisplay:
         self._env = {"DISPLAY": self.display, "LIBGL_ALWAYS_SOFTWARE": "1"}
         if self.gpu is not None:
             self._env.update(MesaIdentity(self.gpu).materialize(self._workdir / "drirc.d"))
+        await self._apply_keyboard()
         if self.window_manager:
             await self._start_window_manager()
+        if self._wm is not None:
+            await self._start_panel()
         if self._wm is None and self.work_area is not None:
             await asyncio.to_thread(publish_work_area, self.display, self.screen, self.work_area)
-        log.info("virtual display %s ready (%s)", self.display, geometry)
+        log.info(
+            "virtual display %s ready (%s, keyboard %s)", self.display, geometry, self.keyboard
+        )
 
     async def _spawn_xvfb(
         self, xvfb: str, number: int, geometry: str
@@ -259,6 +297,50 @@ class VirtualDisplay:
             return
         log.debug("no window manager found; publishing the work area ourselves")
 
+    async def _apply_keyboard(self) -> None:
+        """Load ``us`` or ``us,ru`` so XTest can type ЙЦУКЕН without Alt+Shift."""
+        setxkbmap = shutil.which("setxkbmap")
+        if setxkbmap is None or self.display is None:
+            log.warning("setxkbmap is missing; non-US XTest input will use insertText")
+            return
+        proc = await asyncio.create_subprocess_exec(
+            setxkbmap,
+            "-display", self.display,
+            "-layout", self.keyboard,
+            "-option", "",
+            env={**os.environ, **self._env},
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            log.warning(
+                "setxkbmap -layout %s failed: %s",
+                self.keyboard,
+                stderr.decode(errors="replace").strip(),
+            )
+        else:
+            log.info("keyboard layout %s on %s", self.keyboard, self.display)
+
+    async def _start_panel(self) -> None:
+        """A tint2 bar, so openbox publishes a work area shorter than the screen."""
+        tint2 = shutil.which("tint2")
+        if tint2 is None or self._workdir is None:
+            log.debug("tint2 is not installed; the window manager decides the work area")
+            return
+        config = self._workdir / "tint2rc"
+        config.write_text(_TINT2RC)
+        self._panel = await asyncio.create_subprocess_exec(
+            tint2,
+            "-c", str(config),
+            env={**os.environ, **self._env},
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            preexec_fn=die_with_parent,
+        )  # fmt: skip
+        await asyncio.sleep(0.4)
+        log.info("panel tint2 started on %s", self.display)
+
     def environment(self) -> dict[str, str]:
         """Environment variables Chrome must inherit to use this display."""
         if self.display is None:
@@ -271,7 +353,7 @@ class VirtualDisplay:
         return ("--ignore-gpu-blocklist",)
 
     async def stop(self) -> None:
-        for proc in (self._wm, self._xvfb):
+        for proc in (self._panel, self._wm, self._xvfb):
             if proc is not None and proc.returncode is None:
                 proc.terminate()
                 try:
@@ -279,6 +361,7 @@ class VirtualDisplay:
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
+        self._panel = None
         self._wm = None
         self._xvfb = None
         if self._workdir is not None:

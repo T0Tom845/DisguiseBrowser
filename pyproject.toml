@@ -1,12 +1,12 @@
 [project]
 name = "disguisebrowser"
-version = "0.1.0"
+version = "0.3.0"
 description = "Live, stealth browser automation on top of the real system Chrome: quiet CDP, below-JS identity, humanized input."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "DisguiseBrowser contributors" }]
-keywords = ["browser", "automation", "scraping", "stealth", "anti-detect", "cdp", "chrome"]
+keywords = ["browser", "automation", "scraping", "stealth", "anti-detect", "cdp", "chrome", "camoufox", "firefox"]
 dependencies = [
     "python-xlib>=0.33",
     "websockets>=17.0",
@@ -18,6 +18,9 @@ disguise = "disguisebrowser.cli:main"
 [project.optional-dependencies]
 mcp = [
     "mcp>=2.0",
+]
+camoufox = [
+    "camoufox[geoip]>=0.5.8",
 ]
 
 [dependency-groups]

@@ -9,17 +9,25 @@ import contextlib
 import logging
 import os
 import random
+import secrets
 from collections.abc import Generator
-from dataclasses import replace
-from typing import Any, Literal
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from disguisebrowser.cdp import Connection, QuietCdpPolicy, Session
 from disguisebrowser.display import VirtualDisplay
-from disguisebrowser.errors import CdpError, LaunchError
+from disguisebrowser.errors import CdpError, ConnectionClosedError, EvaluationError, LaunchError
 from disguisebrowser.input import PRESETS, HumanProfile
 from disguisebrowser.input.devices import CdpInputBackend, InputBackend
 from disguisebrowser.input.xtest import XTestInputBackend
-from disguisebrowser.launcher import ChromeProcess, launch_chrome
+from disguisebrowser.launcher import (
+    AttachedChrome,
+    ChromeProcess,
+    _http_get_json,
+    launch_chrome,
+)
 from disguisebrowser.page import Page
 from disguisebrowser.persona import GPU_PRESETS, Persona
 from disguisebrowser.proxy import (
@@ -29,18 +37,36 @@ from disguisebrowser.proxy import (
     languages_for_country,
     resolve_geo,
 )
+from disguisebrowser.warmup import WarmupVisit
+from disguisebrowser.warmup import warmup as warmup_browser
 
 log = logging.getLogger(__name__)
 
 DisplayMode = Literal["auto", "host", "virtual"]
 InputMode = Literal["auto", "cdp", "xtest"]
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_WORKER_TYPES = frozenset({"worker", "service_worker", "shared_worker"})
+
+
+@dataclass
+class AttachedTarget:
+    """An iframe or worker paused at start and resumed without ``Runtime.enable``."""
+
+    target_id: str
+    session_id: str
+    type: str
+    url: str
+    # Isolated world of an iframe, created on first use (see ``Browser._iframe_context``).
+    context_id: int | None = None
 
 
 class Browser:
+    engine = "chrome"
+
     def __init__(
         self,
         connection: Connection,
-        chrome: ChromeProcess,
+        chrome: ChromeProcess | AttachedChrome,
         *,
         persona: Persona,
         display: VirtualDisplay | None,
@@ -48,6 +74,7 @@ class Browser:
         gateway: ProxyGateway | None = None,
         geo: GeoInfo | None = None,
         input_mode: InputMode = "cdp",
+        owns_process: bool = True,
     ) -> None:
         self.connection = connection
         self.chrome = chrome
@@ -57,9 +84,12 @@ class Browser:
         self.gateway = gateway
         self.geo = geo
         self.input_mode: InputMode = input_mode
+        self.owns_process = owns_process
         self.version: dict[str, Any] = {}
         self._rng = persona.rng("input") if persona.seed is not None else random.Random()
         self._pages: dict[str, Page] = {}
+        self._children: dict[str, AttachedTarget] = {}
+        self._child_initializing: set[str] = set()
         self._active_page: Page | None = None
         self._initializing: set[str] = set()
         self._page_futures: dict[str, asyncio.Future[Page]] = {}
@@ -75,7 +105,9 @@ class Browser:
         if self.input_mode == "xtest":
             display_name = self.display.display if self.display else os.environ.get("DISPLAY")
             if display_name:
-                return XTestInputBackend(display_name, page, session)
+                return XTestInputBackend(
+                    display_name, page, session, owns_layout=self.display is not None
+                )
             log.warning("input='xtest' requested but no X display is known; using CDP input")
         return CdpInputBackend(session)
 
@@ -100,10 +132,15 @@ class Browser:
         session_id = params["sessionId"]
         target_id = info["targetId"]
         session = self.connection.session(session_id)
+        log.debug("attached %s %s (%s)", info["type"], info.get("url", ""), target_id[:8])
         if info["type"] != "page":
-            # iframes, workers, service workers: nothing to configure yet — let them run.
-            if params.get("waitingForDebugger"):
-                self._spawn(self._resume(session, info["type"]))
+            if target_id in self._children or target_id in self._child_initializing:
+                self._spawn(self._detach_duplicate(session_id))
+                return
+            self._child_initializing.add(target_id)
+            self._spawn(
+                self._initialize_child(session, info, bool(params.get("waitingForDebugger")))
+            )
             return
         if target_id in self._pages or target_id in self._initializing:
             # Auto-attach and an explicit attach raced; keep the first session only.
@@ -129,10 +166,70 @@ class Browser:
         if future is not None and not future.done():
             future.set_result(page)
 
+    async def _initialize_child(
+        self, session: Session, info: dict[str, Any], waiting: bool
+    ) -> None:
+        """Prepare an OOPIF or worker, then let its first script run.
+
+        ``waitForDebuggerOnStart`` pauses these targets before any script. Pages
+        get an isolated world; workers get nothing observable — in particular
+        not ``Runtime.enable``, which is the leak this client exists to avoid.
+        """
+        target_id = info["targetId"]
+        kind = info["type"]
+        if not session.session_id:
+            log.warning("attached %s target without a session id; resuming", kind)
+            self._child_initializing.discard(target_id)
+            if waiting:
+                await self._resume(session, kind)
+            return
+        target = AttachedTarget(target_id, session.session_id, kind, str(info.get("url", "")))
+        try:
+            if kind == "iframe":
+                await self._prepare_iframe(session, target)
+            elif kind not in _WORKER_TYPES:
+                log.debug("resuming unhandled target type %s", kind)
+        except Exception as exc:
+            # Never leave a paused child behind: a frozen iframe is far more
+            # visible than a missing isolated world.
+            log.warning("target %s (%s) setup failed: %s", target_id, kind, exc)
+        finally:
+            self._children[target_id] = target
+            self._child_initializing.discard(target_id)
+            if waiting:
+                await self._resume(session, kind)
+
+    async def _prepare_iframe(self, session: Session, target: AttachedTarget) -> None:
+        """Track the frame's URL. The isolated world is created lazily: before the
+        paused frame commits its first document, ``Page.createIsolatedWorld``
+        does not answer, and the frame cannot commit while paused."""
+        await session.send("Page.enable")
+
+        def on_navigated(params: dict[str, Any]) -> None:
+            frame = params.get("frame", {})
+            if frame.get("id") == target.target_id:
+                target.url = str(frame.get("url", target.url))
+                target.context_id = None  # the old world died with the old document
+
+        session.on("Page.frameNavigated", on_navigated)
+
+    async def _iframe_context(self, target: AttachedTarget, session: Session) -> int:
+        if target.context_id is None:
+            world = await session.send(
+                "Page.createIsolatedWorld",
+                {
+                    "frameId": target.target_id,
+                    "worldName": "w" + secrets.token_hex(6),
+                    "grantUniveralAccess": False,
+                },
+            )
+            target.context_id = int(world["executionContextId"])
+        return target.context_id
+
     async def _resume(self, session: Session, kind: str) -> None:
         try:
             await session.send("Runtime.runIfWaitingForDebugger")
-        except CdpError as exc:
+        except (CdpError, ConnectionClosedError) as exc:
             log.debug("could not resume %s target: %s", kind, exc)
 
     async def _detach_duplicate(self, session_id: str) -> None:
@@ -153,6 +250,8 @@ class Browser:
             self.connection.drop_session(session_id)
         if target_id and target_id in self._pages:
             self._pages.pop(target_id)._closed = True
+        if target_id:
+            self._children.pop(target_id, None)
 
     async def _ensure_page(self, target_id: str, timeout: float = 10.0) -> Page:
         """Return the initialized Page for ``target_id``, attaching if necessary."""
@@ -177,6 +276,45 @@ class Browser:
     @property
     def pages(self) -> list[Page]:
         return [p for p in self._pages.values() if not p.closed]
+
+    @property
+    def targets(self) -> list[AttachedTarget]:
+        """Iframes and workers attached since launch, besides top-level pages."""
+        return list(self._children.values())
+
+    async def evaluate_target(self, target_id: str, expression: str) -> Any:
+        """Evaluate ``expression`` in an attached iframe (isolated world) or worker."""
+        target = self._children.get(target_id)
+        if target is None:
+            raise LaunchError(f"no attached target {target_id}")
+        params: dict[str, Any] = {
+            "expression": expression,
+            "returnByValue": True,
+            "awaitPromise": True,
+        }
+        session = self.connection.session(target.session_id)
+        if target.type == "iframe":
+            params["contextId"] = await self._iframe_context(target, session)
+        result = await session.send("Runtime.evaluate", params)
+        if "exceptionDetails" in result:
+            details = result["exceptionDetails"]
+            text = (details.get("exception") or {}).get("description") or details.get("text")
+            raise EvaluationError(str(text or "JavaScript error"), details)
+        value: Any = result.get("result", {}).get("value")
+        return value
+
+    async def warmup(
+        self,
+        urls: list[str] | None = None,
+        *,
+        count: int = 3,
+        dwell: tuple[float, float] = (1.0, 2.5),
+    ) -> list[WarmupVisit]:
+        """Visit ordinary sites so the profile is not an empty first launch.
+
+        See :func:`disguisebrowser.warmup.warmup`.
+        """
+        return await warmup_browser(self, urls=urls, count=count, dwell=dwell)
 
     async def new_page(self, url: str = "about:blank", **goto_kwargs: Any) -> Page:
         result = await self.root.send("Target.createTarget", {"url": "about:blank"})
@@ -203,16 +341,18 @@ class Browser:
         self._closed = True
         for task in list(self._tasks):
             task.cancel()
-        try:
-            await self.root.send("Browser.close", timeout=5)
-        except Exception as exc:  # best effort — the process is terminated below anyway
-            log.debug("Browser.close: %s", exc)
+        if self.owns_process:
+            try:
+                await self.root.send("Browser.close", timeout=5)
+            except Exception as exc:  # best effort — the process is terminated below anyway
+                log.debug("Browser.close: %s", exc)
         await self.connection.close()
-        await self.chrome.terminate()
-        if self.display is not None:
-            await self.display.stop()
-        if self.gateway is not None:
-            await self.gateway.stop()
+        if self.owns_process:
+            await self.chrome.terminate()
+            if self.display is not None:
+                await self.display.stop()
+            if self.gateway is not None:
+                await self.gateway.stop()
 
     async def __aenter__(self) -> Browser:
         return self
@@ -224,23 +364,27 @@ class Browser:
         return f"<Browser {self.version.get('product', '?')} pages={len(self._pages)}>"
 
 
-class LaunchHandle:
+class _Closable(Protocol):
+    async def close(self) -> None: ...
+
+
+class LaunchHandle[BrowserT: _Closable]:
     """Awaitable *and* async-context-manager result of :func:`launch`."""
 
     def __init__(self, coro_factory: Any) -> None:
         self._factory = coro_factory
-        self._browser: Browser | None = None
+        self._browser: BrowserT | None = None
 
-    def __await__(self) -> Generator[Any, None, Browser]:
+    def __await__(self) -> Generator[Any, None, BrowserT]:
         return self._start().__await__()
 
-    async def _start(self) -> Browser:
+    async def _start(self) -> BrowserT:
         if self._browser is None:
             self._browser = await self._factory()
         assert self._browser is not None
         return self._browser
 
-    async def __aenter__(self) -> Browser:
+    async def __aenter__(self) -> BrowserT:
         return await self._start()
 
     async def __aexit__(self, *exc: object) -> None:
@@ -262,7 +406,7 @@ def launch(
     proxy_gateway: bool = True,
     window_manager: bool = True,
     unsafe: bool = False,
-) -> LaunchHandle:
+) -> LaunchHandle[Browser]:
     """Start a stealth Chrome.
 
     ``display``: ``"host"`` uses the current ``$DISPLAY``; ``"virtual"`` starts an
@@ -412,8 +556,83 @@ def _prepare_display(
         gpu=persona.gpu,
         work_area=persona.work_area(),
         window_manager=window_manager,
+        keyboard=persona.keyboard_layout(),
     )
     return persona, virtual
+
+
+def connect(
+    *,
+    ws_url: str | None = None,
+    port: int | None = None,
+    host: str = "127.0.0.1",
+    persona: Persona | None = None,
+    human: str | HumanProfile = "default",
+    input: InputMode = "auto",
+    unsafe: bool = False,
+    allow_remote: bool = False,
+) -> LaunchHandle[Browser]:
+    """Attach to a Chrome that is already running with a DevTools port.
+
+    The browser is not relaunched and not closed on :meth:`Browser.close` —
+    only the CDP connection is dropped. Identity flags (timezone, languages,
+    GPU, proxy) are whatever that Chrome was started with; ``persona`` here
+    only feeds the humanizer and the keyboard layout used for input.
+
+    ``host`` / ``ws_url`` must be loopback unless ``allow_remote=True``.
+    """
+    profile = PRESETS[human] if isinstance(human, str) else human
+
+    async def start() -> Browser:
+        resolved, resolved_port = await _resolve_endpoint(
+            ws_url, port, host, allow_remote=allow_remote
+        )
+        chosen = persona or Persona.from_host()
+        connection = await Connection.open(resolved, policy=QuietCdpPolicy(unsafe=unsafe))
+        try:
+            browser = Browser(
+                connection,
+                AttachedChrome(port=resolved_port, ws_url=resolved, user_data_dir=Path(".")),
+                persona=chosen,
+                display=None,
+                human=profile,
+                input_mode=_resolve_input_mode(input, None),
+                owns_process=False,
+            )
+            await browser._setup()
+        except BaseException:
+            await connection.close()
+            raise
+        log.info("attached to %s at %s", browser.version.get("product"), resolved)
+        return browser
+
+    return LaunchHandle(start)
+
+
+async def _resolve_endpoint(
+    ws_url: str | None, port: int | None, host: str, *, allow_remote: bool
+) -> tuple[str, int]:
+    if ws_url is None and port is None:
+        raise LaunchError("connect() needs ws_url or port")
+    if ws_url is None:
+        assert port is not None
+        if not allow_remote and host.lower() not in _LOOPBACK_HOSTS:
+            raise LaunchError(
+                f"refusing to connect to DevTools on {host}; pass allow_remote=True to override"
+            )
+        payload = await asyncio.to_thread(_http_get_json, f"http://{host}:{port}/json/version")
+        found = payload.get("webSocketDebuggerUrl")
+        if not found:
+            raise LaunchError(f"http://{host}:{port}/json/version has no webSocketDebuggerUrl")
+        return str(found), port
+    if not allow_remote and not _endpoint_is_loopback(ws_url):
+        raise LaunchError(f"refusing to connect to {ws_url}; pass allow_remote=True to override")
+    parsed = urlsplit(ws_url)
+    return ws_url, parsed.port or 0
+
+
+def _endpoint_is_loopback(url: str) -> bool:
+    return (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS
 
 
 def _resolve_input_mode(requested: InputMode, virtual: VirtualDisplay | None) -> InputMode:

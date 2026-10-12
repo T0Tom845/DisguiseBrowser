@@ -5,10 +5,11 @@ from disguisebrowser.launcher import (
     LaunchConfig,
     build_args,
     default_preferences,
+    headless_extra_args,
     headless_user_agent,
     prepare_profile,
 )
-from disguisebrowser.persona import Persona, Window
+from disguisebrowser.persona import Persona, Screen, Window
 
 FORBIDDEN_FLAGS = (
     "--enable-automation",
@@ -54,6 +55,14 @@ def test_proxy_server_is_whatever_the_gateway_decided(tmp_path: Path) -> None:
 def test_headless_user_agent_strips_headless_marker() -> None:
     ua = headless_user_agent("154.0.8037.97")
     assert "Headless" not in ua and "Chrome/154.0.0.0" in ua and "X11; Linux x86_64" in ua
+
+
+def test_headless_extra_args_set_screen_from_the_persona() -> None:
+    persona = Persona(screen=Screen(1600, 900))
+    args = headless_extra_args(persona, "154.0.8037.97")
+    assert "--headless=new" in args
+    assert "--screen-info=1600x900" in args
+    assert any(a.startswith("--user-agent=") and "Headless" not in a for a in args)
 
 
 def test_prepare_profile_writes_and_merges_preferences(tmp_path: Path) -> None:
