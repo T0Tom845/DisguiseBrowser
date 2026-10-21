@@ -1,29 +1,31 @@
 # DisguiseBrowser
 
+[![Русский](https://img.shields.io/badge/README-%D1%80%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9-1f6feb?style=for-the-badge)](README.ru.md)
+
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![Linux](https://img.shields.io/badge/platform-Linux-111111?logo=linux&logoColor=white)](#установка)
+[![Linux](https://img.shields.io/badge/platform-Linux-111111?logo=linux&logoColor=white)](#install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Живой браузер для парсинга и автоматизации. Страница видит обычный десктопный сеанс: установленный в системе Chrome или [Camoufox](https://github.com/daijro/camoufox) — сборку Firefox, где отпечаток подменяется в C++, а не скриптом на странице.
+A live browser for scraping and automation. The page sees a normal desktop session: the Chrome already installed on the machine, or [Camoufox](https://github.com/daijro/camoufox), a Firefox build whose fingerprint is applied in C++ rather than by a script on the page.
 
-Один и тот же API у библиотеки, CLI и MCP-сервера. Python 3.12+, Linux. Сейчас **v0.3**.
+The library, the CLI, and the MCP server share one API. Python 3.12+, Linux. Current release: **v0.3**.
 
 | | Chrome | Camoufox |
 |---|---|---|
-| Браузер | системный Google Chrome | Firefox от Camoufox |
-| Когда он уместен | цель ждёт Chrome и его TLS | много долгоживущих личностей |
-| Личность | персона с этой машины, на виртуальном дисплее — GPU через Mesa | именной профиль: устройство, экран, cookies, кэш |
-| Ввод | XTest, события самого X-сервера | Playwright/Juggler и гуманизация Camoufox |
-| Сеть | свой SOCKS5-шлюз, пароль не попадает в командную строку | тот же шлюз |
+| Browser | system Google Chrome | Camoufox's Firefox |
+| When it fits | the target expects Chrome and its TLS | many long-lived identities |
+| Identity | a persona taken from this machine; on a virtual display, the GPU name comes from Mesa | a named profile: device, screen, cookies, cache |
+| Input | XTest, events from the X server itself | Playwright/Juggler and Camoufox's own humanization |
+| Network | a local SOCKS5 gateway; the proxy password never lands on the command line | the same gateway |
 
-Модель угроз, что именно закрыто и чем это проверено — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) и [`docs/SIGNALS.md`](docs/SIGNALS.md).
+What the checks look for, what is covered, and how it was measured is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/SIGNALS.md`](docs/SIGNALS.md). Those notes are in Russian.
 
-## Установка
+## Install
 
-Chrome — тот, что уже стоит в системе. Camoufox ставится отдельной командой и качается один раз.
+Chrome is the one already on the system. Camoufox is fetched once, separately.
 
 ```bash
-# сервер без монитора
+# a server with no monitor
 sudo apt install xvfb libgl1-mesa-dri mesa-utils openbox fonts-noto-color-emoji
 
 uv sync --extra camoufox --extra mcp
@@ -31,11 +33,11 @@ uv run python -m camoufox fetch
 uv run disguise doctor
 ```
 
-`pip install -e '.[camoufox,mcp]'` делает то же самое. Каталог `camoufox-dist/` в git не входит: собранный Firefox туда не помещается. Официальный бинарник, который качает `camoufox fetch`, запускается сразу. Свой патч шума canvas подключается отдельно, это [ниже](#своя-сборка-camoufox).
+`pip install -e '.[camoufox,mcp]'` does the same. The `camoufox-dist/` directory is not in git: a built Firefox does not fit on GitHub. The official binary from `camoufox fetch` runs immediately. The canvas-noise patch is separate, [below](#a-camoufox-build-of-your-own).
 
-## Быстрый старт
+## Quick start
 
-Профиль Camoufox. Устройство закрепляется при создании и не пересобирается на следующем запуске.
+A Camoufox profile. The device is pinned when the profile is created and is not redrawn on the next launch.
 
 ```python
 import asyncio
@@ -52,7 +54,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Тот же сценарий из терминала:
+The same flow from the shell:
 
 ```bash
 disguise profile create shop-1 --os windows --screen 1920x1080 \
@@ -61,7 +63,7 @@ disguise open --engine camoufox --profile shop-1 https://example.com
 disguise test --engine camoufox --profile shop-1 --display virtual
 ```
 
-Системный Chrome, без профиля Camoufox:
+System Chrome, without a Camoufox profile:
 
 ```python
 from disguisebrowser import Persona, launch
@@ -73,28 +75,28 @@ persona = Persona.from_host(
 browser = await launch(persona=persona, geoip=True, user_data_dir="./profiles/berlin")
 ```
 
-`geoip=True` берёт таймзону и языки по exit-IP прокси. Chrome видит только локальный SOCKS5 без пароля. Несколько браузеров в одном процессе — несколько `launch()`: у каждого свой дисплей, профиль и прокси.
+`geoip=True` takes the timezone and languages from the proxy's exit IP. Chrome only sees a local passwordless SOCKS5. Several browsers in one process are several `launch()` calls: each gets its own display, profile, and proxy.
 
-## Профили
+## Profiles
 
-Профиль — это `profile.json` (устройство, ОС, прокси, языки, таймзона, seed; файл с правами `0600`) и каталог Firefox с cookies, localStorage и кэшем. Хранилище: `$DISGUISE_HOME/profiles` или `~/.local/share/disguisebrowser/profiles`.
+A profile is `profile.json` (device, OS, proxy, languages, timezone, seed; mode `0600`) plus a Firefox directory with cookies, localStorage, and cache. Storage lives in `$DISGUISE_HOME/profiles` or `~/.local/share/disguisebrowser/profiles`.
 
 ```bash
 disguise profile list
 disguise profile create work --os macos --kind preset --seed 7
-disguise profile set shop-1 --proxy ''          # сеть меняется, устройство нет
-disguise profile set shop-1 --screen 1920x1080  # шрифты и шум canvas пересчитаются со следующего запуска
+disguise profile set shop-1 --proxy ''          # network changes, the device does not
+disguise profile set shop-1 --screen 1920x1080  # fonts and canvas noise recompute on the next launch
 disguise profile delete work --yes
 ```
 
-Один профиль — один браузер одновременно. `delete` тоже отказывает, пока профиль занят.
+One profile, one browser at a time. `delete` also refuses while the profile is in use.
 
-`disguise manager` открывает одну страницу на `127.0.0.1:8787` со всеми профилями. У строки есть выключатель, адрес и кнопка «В браузер»: клики, прокрутка и клавиатура уходят в этот профиль, VNC для этого не нужен. Там же задаются разрешение, прокси и заметка. `Ctrl+C` в терминале закрывает менеджер и те окна, которые он сам открыл.
+`disguise manager` serves one page at `127.0.0.1:8787` with every profile. Each row has a switch, an address, and an "In the browser" button: clicks, scrolling, and the keyboard go to that profile, so this view does not need VNC. Screen size, proxy, and a note are edited there too. `Ctrl+C` in the terminal closes the manager and the windows it opened.
 
 ## MCP
 
 ```bash
-disguise mcp                      # stdio, для Cursor / Claude
+disguise mcp                      # stdio, for Cursor / Claude
 disguise mcp --http --port 8000   # Streamable HTTP
 ```
 
@@ -109,11 +111,11 @@ disguise mcp --http --port 8000   # Streamable HTTP
 }
 ```
 
-Сессии независимы: `browser_launch` возвращает `session_id`. Дальше `navigate`, `snapshot` (дерево доступности с `[ref=eN]`), `click` / `type_text` / `scroll` по ref или CSS, `screenshot`, `evaluate`, вкладки, `browser_list`, `browser_close`. Для Camoufox: `browser_launch(engine="camoufox", profile="shop-1", create=true, os="windows")`, плюс `profile_list` и `profile_create`. Удаление профилей оставлено в CLI.
+Sessions are independent: `browser_launch` returns a `session_id`. Then `navigate`, `snapshot` (an accessibility tree with `[ref=eN]`), `click` / `type_text` / `scroll` by ref or CSS, `screenshot`, `evaluate`, tabs, `browser_list`, `browser_close`. For Camoufox: `browser_launch(engine="camoufox", profile="shop-1", create=true, os="windows")`, plus `profile_list` and `profile_create`. Deleting profiles stays in the CLI.
 
 ## Docker
 
-Образ Chrome: системный Chrome, Xvfb, Mesa, openbox, tint2.
+The Chrome image: system Chrome, Xvfb, Mesa, openbox, tint2.
 
 ```bash
 docker build -t disguisebrowser .
@@ -121,9 +123,9 @@ docker run --rm --shm-size=1g --security-opt seccomp=unconfined disguisebrowser 
 docker run --rm --shm-size=1g --security-opt seccomp=unconfined disguisebrowser test --display virtual
 ```
 
-`seccomp=unconfined` нужен песочнице Chrome. Флаг `--no-sandbox` библиотека не ставит.
+`seccomp=unconfined` is what Chrome's sandbox needs. The library does not pass `--no-sandbox`.
 
-Образ Camoufox по умолчанию сам скачивает официальную сборку:
+The Camoufox image downloads the official build unless you hand it another one:
 
 ```bash
 docker build -f Dockerfile.camoufox -t disguisebrowser-fox .
@@ -133,31 +135,31 @@ docker run --rm --shm-size=1g -v fox-data:/data disguisebrowser-fox \
     test --engine camoufox --profile shop-1 --display virtual
 ```
 
-Профили, cookies и кэш лежат в `/data`. Этот том имеет смысл сохранять.
+Profiles, cookies, and cache live in `/data`. Keep that volume.
 
-Своя сборка с патчем canvas подставляется архивом, без исходников Firefox в контексте сборки:
+A build that includes the canvas patch is passed in as an archive. Firefox sources are not part of the image build:
 
 ```bash
 docker build -f Dockerfile.camoufox \
     --build-arg CAMOUFOX_DIST_URL=https://example.com/camoufox-dist.tar.zst \
-    --build-arg CAMOUFOX_DIST_SHA256=<sha256 архива> \
+    --build-arg CAMOUFOX_DIST_SHA256=<sha256 of the archive> \
     -t disguisebrowser-fox .
 ```
 
-Архив — это содержимое каталога сборки, `camoufox-bin` лежит в корне:
+The archive is the contents of the build directory, with `camoufox-bin` at the root:
 
 ```bash
 tar -C camoufox-dist -I zstd -cf camoufox-dist.tar.zst .
 sha256sum camoufox-dist.tar.zst
 ```
 
-Такой архив уместно класть во вложение [GitHub Release](https://github.com/T0Tom845/DisguiseBrowser/releases): файл около 300 МБ, в git он не проходит лимит GitHub.
+That archive belongs in a [GitHub Release](https://github.com/T0Tom845/DisguiseBrowser/releases). It is about 300 MB, past GitHub's limit for a file in git.
 
-## Своя сборка Camoufox
+## A Camoufox build of your own
 
-Официальный Camoufox 156 не меняет пиксели canvas. Профили на одной машине получают одну и ту же картинку. Патч [`fork/camoufox/zz-canvas-readback.patch`](fork/camoufox/zz-canvas-readback.patch) при чтении слегка сдвигает редкие пиксели. Куда именно — зависит от сида профиля (`canvas:seed`), который запуск и так передаёт. Официальный бинарник этот ключ игнорирует.
+Official Camoufox 156 does not change canvas pixels. Profiles on one machine share the same picture. The patch [`fork/camoufox/zz-canvas-readback.patch`](fork/camoufox/zz-canvas-readback.patch) shifts a few rare pixels on read. Where it shifts them depends on the profile seed (`canvas:seed`), which launch already sends. The official binary ignores that key.
 
-Сборка один раз, в отдельном клоне [camoufox](https://github.com/daijro/camoufox) на теге `v156.0.1-beta.36`:
+Build once, in a separate clone of [camoufox](https://github.com/daijro/camoufox) at tag `v156.0.1-beta.36`:
 
 ```bash
 cp fork/camoufox/zz-canvas-readback.patch patches/
@@ -165,15 +167,15 @@ make dir
 make build
 ```
 
-Дальше каталог готового браузера либо пакуется в архив для Docker, либо указывается через `CAMOUFOX_EXECUTABLE_PATH`. Подробности и когда пересобирать — в [`fork/camoufox/README.md`](fork/camoufox/README.md). Исходники Firefox в этот репозиторий не входят. Патч и файлы, из которых он собран, лежат в `fork/camoufox/` и остаются под MPL-2.0.
+The finished browser directory is then packed for Docker, or selected with `CAMOUFOX_EXECUTABLE_PATH`. When to rebuild is in [`fork/camoufox/README.md`](fork/camoufox/README.md). Firefox sources are not in this repository. The patch and the files it is built from live in `fork/camoufox/` and stay under MPL-2.0.
 
-Проверено на сборке 156.0.1-beta.36 в образе без GPU: sannysoft 0 из 56 (1 проверка неприменима к Firefox), rebrowser 5 green, TLS — JA4 Firefox. Замер «много профилей → много разных хэшей canvas» в репозитории ещё не оформлен отдельной командой.
+Measured on build 156.0.1-beta.36 in an image with no GPU: sannysoft 0 of 56 failed (1 check does not apply to Firefox), rebrowser 5 green, TLS is a Firefox JA4. A "many profiles, many distinct canvas hashes" run is not wired up as its own command yet.
 
-TLS и HTTP/2 у Camoufox принадлежат Firefox и совпадают с его User-Agent. Цели, которым нужен именно Chrome, закрывает системный движок. Проверка «Chrome (New)» на sannysoft для Camoufox помечается как `n/a for this engine`. Прокси без `--geoip` оставляет таймзону и язык хоста, и Camoufox пишет `LeakWarning`.
+Camoufox's TLS and HTTP/2 belong to Firefox and match its User-Agent. Targets that need Chrome specifically go through the system engine. The sannysoft "Chrome (New)" check is reported as `n/a for this engine` on Camoufox. A proxy without `--geoip` leaves the host timezone and language in place, and Camoufox prints a `LeakWarning`.
 
-## Что уже измерено на Chrome
+## What was measured on Chrome
 
-`disguise test --display virtual` в контейнере без GPU, Chrome 155:
+`disguise test --display virtual` in a container with no GPU, Chrome 155:
 
 ```
 PASS  sannysoft             0 of 57 checks failed
@@ -183,9 +185,9 @@ PASS  browserscan           verdict: Normal
 PASS  tls                   JA4 t13d1517h2_… · HTTP/2 52d84b11…
 ```
 
-Ввод на Chrome идёт через XTest: у событий CDP при нажатой кнопке `pressure` остаётся 0, у физической мыши и у XTest — 0.5. На виртуальном дисплее русская персона получает раскладку ЙЦУКЕН реальными клавишами, без аккорда, который страница могла бы увидеть.
+Chrome input goes through XTest. CDP pointer events keep `pressure` at 0 while the button is down; a physical mouse and XTest report 0.5. On a virtual display, a Russian persona gets a real ЙЦУКЕН layout, not a chord the page could observe.
 
-Снять отпечаток и сравнить его с другой машиной:
+Capture a fingerprint and compare it with another machine:
 
 ```bash
 disguise capture
@@ -193,28 +195,28 @@ disguise capture --serve
 disguise diff fingerprints/a.json fingerprints/b.json
 ```
 
-## Ограничения
+## Limits
 
-- Headless (`headless=True`) — явный режим со слабым стелсом.
-- На виртуальном дисплее без GPU canvas, audio и лимиты WebGL остаются от llvmpipe. Подмена имени видеокарты этому не помогает.
-- ЙЦУКЕН переключается на своём виртуальном дисплее. На чужом X-сервере кириллица уходит через `Input.insertText`.
-- Скриптовый ввод Camoufox (MCP, `click`, `type`) намеренно остаётся на Playwright/Juggler. Живой вид в `disguise manager` гуманизацию выключает. Буфер обмена этого вида пока не связан с буфером машины, где открыт менеджер.
+- Headless (`headless=True`) is an explicit mode with weak stealth.
+- On a virtual display with no GPU, canvas, audio, and WebGL limits stay on llvmpipe. Renaming the GPU does not change that.
+- ЙЦУКЕН is switched on DisguiseBrowser's own virtual display. On someone else's X server, Cyrillic goes through `Input.insertText`.
+- Scripted Camoufox input (MCP, `click`, `type`) stays on Playwright/Juggler. The live view in `disguise manager` turns humanization off. That view's clipboard is not yet tied to the clipboard of the machine where the manager is open.
 
-Инструмент рассчитан на работу в рамках правил целевых сайтов. Как им пользуются — ответственность того, кто его запускает.
+Use it within the rules of the sites you open. What you do with it is on you.
 
-## Документация
+## Documentation
 
 | | |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | зачем проект устроен так, а не как форк, который надо пересобирать на каждую правку |
-| [`docs/SIGNALS.md`](docs/SIGNALS.md) | таблица сигналов: что закрыто, что нет, чем проверено |
-| [`docs/FORK_PLAN.md`](docs/FORK_PLAN.md) | если когда-нибудь понадобится свой патч Chromium |
-| [`fork/camoufox/README.md`](fork/camoufox/README.md) | патч canvas: что он меняет и как собрать браузер |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | why this is a library, not a fork you rebuild for every change (Russian) |
+| [`docs/SIGNALS.md`](docs/SIGNALS.md) | signal table: covered, open, and how each one was checked (Russian) |
+| [`docs/FORK_PLAN.md`](docs/FORK_PLAN.md) | if a Chromium patch is ever actually needed (Russian) |
+| [`fork/camoufox/README.md`](fork/camoufox/README.md) | the canvas patch: what it changes and how to build the browser |
 
-Код библиотеки живёт в `src/disguisebrowser/`. Chrome — `launcher.py`, `cdp/`, `persona.py`, `input/`. Camoufox — пакет `camoufox/`. Общий контракт страницы — `protocols.py`, поэтому MCP, scorecard и прогрев не ветвятся по движку.
+The library lives in `src/disguisebrowser/`. Chrome is `launcher.py`, `cdp/`, `persona.py`, `input/`. Camoufox is the `camoufox/` package. The shared page contract is `protocols.py`, so MCP, the scorecard, and warmup do not branch on the engine.
 
-## Лицензия
+## License
 
-Код DisguiseBrowser — [MIT](LICENSE).
+DisguiseBrowser's own code is [MIT](LICENSE).
 
-Camoufox и Firefox, патч в `fork/camoufox/` и любая собранная из них программа — Mozilla Public License 2.0. MIT на остальной репозиторий эти права не отменяет. Состав и атрибуции — в [NOTICE](NOTICE). Имена Firefox и Camoufox принадлежат их проектам. Эта сборка — не официальный Camoufox и не продукт Mozilla.
+Camoufox, Firefox, the patch in `fork/camoufox/`, and any program built from them are Mozilla Public License 2.0. The MIT license on the rest of the repository does not take those rights away. The list and the attributions are in [NOTICE](NOTICE). The Firefox and Camoufox names belong to their projects. This build is not official Camoufox and it is not a Mozilla product.
