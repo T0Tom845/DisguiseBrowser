@@ -1,0 +1,39 @@
+DisguiseBrowser
+Copyright (c) 2026 DisguiseBrowser contributors
+
+The code of this repository is under the MIT License, which is in the file
+LICENSE. That license does not cover the pieces below. Their notices stay
+with them, and nothing in LICENSE limits the rights those licenses give you.
+
+Camoufox
+  https://github.com/daijro/camoufox
+  Mozilla Public License 2.0
+  https://www.mozilla.org/MPL/2.0/
+
+Firefox, which Camoufox builds on
+  Mozilla Public License 2.0
+  Source for a given build is the Firefox revision recorded in that build's
+  application.ini (SourceStamp), plus the Camoufox tag the build was made
+  from, plus any local patch.
+
+fork/camoufox/
+  Modifications to Camoufox/Firefox, including zz-canvas-readback.patch
+  and CanvasFingerprintManager.
+  Mozilla Public License 2.0
+  The MPL notice is in the source files.
+
+Python package "camoufox" (the launcher installed by the camoufox extra)
+  MIT License
+  https://github.com/daijro/camoufox
+
+Camoufox font bundle (font-bundle-v1)
+  Downloaded from the Camoufox GitHub releases when an image is built from
+  a patched browser archive.
+  Twemoji Mozilla, shipped with Camoufox, is CC BY 4.0.
+  https://github.com/mozilla/twemoji-colr
+
+GeoLite2 Data
+  The Camoufox image build may download a GeoLite2 database.
+  This product includes GeoLite2 data created by MaxMind, available from
+  https://www.maxmind.com
+  Use of that database is under the GeoLite2 End User License Agreement.

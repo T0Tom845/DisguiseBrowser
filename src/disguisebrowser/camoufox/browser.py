@@ -2,7 +2,7 @@
 
 Same shape as :mod:`disguisebrowser.browser` — ``async with launch(...) as browser``
 — with a persistent identity on top: a named :class:`~.profiles.Profile` pins the
-device (fingerprint, fonts, voices, GPU parameters, audio seed) and keeps the
+device (fingerprint, fonts, voices, GPU parameters, audio and canvas seeds) and keeps the
 Firefox profile directory, so the same visitor comes back across launches.
 
 Everything outside the browser is shared with the Chrome engine: the loopback
@@ -31,6 +31,7 @@ from playwright.async_api import Error as PwError
 from playwright.async_api import Page as PwPage
 
 from disguisebrowser.browser import LaunchHandle, _prepare_proxy
+from disguisebrowser.camoufox.canvas_noise import canvas_seed
 from disguisebrowser.camoufox.page import CamoufoxPage
 from disguisebrowser.camoufox.profiles import (
     OSES,
@@ -38,8 +39,10 @@ from disguisebrowser.camoufox.profiles import (
     Profile,
     ProfileError,
     ProfileStore,
+    geometry_config,
 )
 from disguisebrowser.errors import LaunchError
+from disguisebrowser.exchange import wants_geoip
 from disguisebrowser.input import PRESETS, HumanProfile
 from disguisebrowser.persona import Persona
 from disguisebrowser.proxy import GeoInfo, ProxyGateway
@@ -237,7 +240,15 @@ def build_options(
         )
     elif os_name:
         options["os"] = os_name
-    config: dict[str, Any] = {}
+    # Pinned with the device. The official Camoufox binary ignores the key
+    # until fork/camoufox/zz-canvas-readback.patch is built in.
+    config: dict[str, Any] = {
+        "canvas:seed": canvas_seed(profile.identity if profile is not None else None)
+    }
+    if profile is not None:
+        # These keys mark the geometry as intentional, so Camoufox keeps the
+        # chosen screen instead of lifting it to 1366×768 or the host monitor.
+        config.update(geometry_config(profile))
     prefs: dict[str, Any] = {}
     if persona.timezone:
         config["timezone"] = persona.timezone
@@ -349,7 +360,11 @@ class _Request:
         base = self.persona or (resolved.persona() if resolved else Persona.from_host())
         if self.proxy:
             base = replace(base, proxy=self.proxy)
-        want_geoip = self.geoip if self.geoip is not None else bool(resolved and resolved.geoip)
+        want_geoip = wants_geoip(
+            self.geoip,
+            has_proxy=bool(base.proxy),
+            profile_geoip=resolved.geoip if resolved is not None else None,
+        )
         final, gateway, geo, proxy_server = await _prepare_proxy(
             base, geoip=want_geoip, use_gateway=True
         )

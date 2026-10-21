@@ -1,7 +1,7 @@
 [project]
 name = "disguisebrowser"
 version = "0.3.0"
-description = "Live, stealth browser automation on top of the real system Chrome: quiet CDP, below-JS identity, humanized input."
+description = "Live browser automation on Linux: system Chrome or pinned Camoufox profiles, one Python API and an MCP server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

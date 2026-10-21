@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Exchange</title>
+<button id="alert">Alert</button>
+<button id="confirm">Confirm</button>
+<button id="prompt">Prompt</button>
+<p id="out">idle</p>
+<input id="file" type="file">
+<p id="file-name"></p>
+<button id="fetch">Fetch</button>
+<p id="net"></p>
+<a id="download" href="/sample.txt" download="sample.txt">Download</a>
+<script>
+document.getElementById("alert").onclick = () => {
+  alert("hello there");
+  document.getElementById("out").textContent = "alerted";
+};
+document.getElementById("confirm").onclick = () => {
+  document.getElementById("out").textContent = confirm("sure?") ? "accepted" : "dismissed";
+};
+document.getElementById("prompt").onclick = () => {
+  const value = prompt("name?", "anon");
+  document.getElementById("out").textContent = value === null ? "dismissed" : value;
+};
+document.getElementById("file").onchange = () => {
+  const file = document.getElementById("file").files[0];
+  document.getElementById("file-name").textContent = file ? file.name : "";
+};
+document.getElementById("fetch").onclick = async () => {
+  const response = await fetch("/payload.json");
+  document.getElementById("net").textContent = await response.text();
+};
+</script>

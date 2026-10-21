@@ -12,6 +12,8 @@ build/
 # Runtime artifacts
 /profiles/
 /reports/
+# Patched Camoufox build. Too large for GitHub; ship it as a release asset.
+/camoufox-dist/
 *.png
 !docs/**/*.png
 

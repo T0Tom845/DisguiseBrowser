@@ -1,0 +1,641 @@
+diff --git a/dom/canvas/CanvasFingerprintManager.cpp b/dom/canvas/CanvasFingerprintManager.cpp
+new file mode 100644
+index 0000000..17a6b24
+--- /dev/null
++++ b/dom/canvas/CanvasFingerprintManager.cpp
+@@ -0,0 +1,166 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "CanvasFingerprintManager.h"
++
++#include <cstring>
++#include <vector>
++
++// The selftest compiles this translation unit without a Camoufox tree.
++#ifndef DISGUISE_CANVAS_NOISE_SELFTEST
++#  include "MaskConfig.hpp"
++#endif
++
++namespace mozilla::dom {
++
++namespace {
++
++// 2/512 of the pixels that are not a flat interior: about 0.39%.
++constexpr uint32_t kFnvOffset = 2166136261u;
++constexpr uint32_t kFnvPrime = 16777619u;
++constexpr uint32_t kRateMask = 511u;
++constexpr uint32_t kRateLimit = 2u;
++
++uint32_t Mix(uint32_t aSeed, uint32_t aContent, uint32_t aIndex) {
++  uint32_t hash = aSeed * 0x9E3779B1u ^ aContent * 0x85EBCA77u ^
++                  aIndex * 0xC2B2AE3Du;
++  hash ^= hash >> 16;
++  hash *= 0x7FEB352Du;
++  hash ^= hash >> 15;
++  hash *= 0x846CA68Bu;
++  hash ^= hash >> 16;
++  return hash;
++}
++
++void LogicalChannels(CanvasFingerprintManager::ByteOrder aOrder, int aOut[4]) {
++  if (aOrder == CanvasFingerprintManager::ByteOrder::BGRA) {
++    aOut[0] = 2;
++    aOut[1] = 1;
++    aOut[2] = 0;
++  } else {
++    aOut[0] = 0;
++    aOut[1] = 1;
++    aOut[2] = 2;
++  }
++  aOut[3] = 3;
++}
++
++bool FlatInterior(const uint8_t* aData, size_t aPixels, size_t aIndex) {
++  const uint8_t* pixel = aData + aIndex * 4;
++  if (aIndex > 0 && aIndex + 1 < aPixels) {
++    return memcmp(pixel, pixel - 4, 4) == 0 &&
++           memcmp(pixel, pixel + 4, 4) == 0;
++  }
++  const uint8_t* neighbor = aIndex == 0 ? pixel + 4 : pixel - 4;
++  return memcmp(pixel, neighbor, 4) == 0;
++}
++
++bool HasMidChannel(const uint8_t* aPixel, const int aChannels[4]) {
++  for (int i = 0; i < 3; ++i) {
++    uint8_t value = aPixel[aChannels[i]];
++    if (value != 0 && value != 255) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool Eligible(const uint8_t* aData, size_t aPixels, size_t aIndex,
++              const int aChannels[4]) {
++  const uint8_t* pixel = aData + aIndex * 4;
++  if (pixel[3] == 0 || FlatInterior(aData, aPixels, aIndex)) {
++    return false;
++  }
++  return HasMidChannel(pixel, aChannels);
++}
++
++void Perturb(uint8_t* aPixel, const int aChannels[4], uint32_t aHash) {
++  int start = static_cast<int>((aHash >> 8) % 3u);
++  for (int step = 0; step < 3; ++step) {
++    int logical = (start + step) % 3;
++    uint8_t* channel = aPixel + aChannels[logical];
++    if (*channel != 0 && *channel != 255) {
++      *channel ^= 1;
++      return;
++    }
++  }
++}
++
++}  // namespace
++
++uint32_t CanvasFingerprintManager::Seed() {
++#ifdef DISGUISE_CANVAS_NOISE_SELFTEST
++  return 0;
++#else
++  if (const auto value = MaskConfig::GetUint32("canvas:seed")) {
++    return *value;
++  }
++  return 0;
++#endif
++}
++
++void CanvasFingerprintManager::ApplyNoise(uint8_t* aData, size_t aLength,
++                                           uint32_t aSeed, ByteOrder aOrder) {
++  if (!aData || aSeed == 0 || aLength < 16 || aLength % 4 != 0) {
++    return;
++  }
++  const size_t pixels = aLength / 4;
++  if (pixels > UINT32_MAX) {
++    return;
++  }
++
++  int channels[4];
++  LogicalChannels(aOrder, channels);
++
++  uint32_t content = kFnvOffset;
++  bool uniform = true;
++  for (size_t i = 0; i < pixels; ++i) {
++    const uint8_t* pixel = aData + i * 4;
++    if (uniform && i > 0 && memcmp(aData, pixel, 4) != 0) {
++      uniform = false;
++    }
++    for (int channel = 0; channel < 4; ++channel) {
++      content ^= pixel[channels[channel]];
++      content *= kFnvPrime;
++    }
++  }
++  if (uniform) {
++    return;
++  }
++
++  struct Pick {
++    uint32_t index;
++    uint32_t hash;
++  };
++  std::vector<Pick> picks;
++  picks.reserve(16);
++  uint32_t bestHash = 0;
++  uint32_t bestIndex = 0;
++  bool haveBest = false;
++
++  for (size_t i = 0; i < pixels; ++i) {
++    if (!Eligible(aData, pixels, i, channels)) {
++      continue;
++    }
++    uint32_t hash = Mix(aSeed, content, static_cast<uint32_t>(i));
++    if (!haveBest || hash < bestHash) {
++      haveBest = true;
++      bestHash = hash;
++      bestIndex = static_cast<uint32_t>(i);
++    }
++    if ((hash & kRateMask) < kRateLimit) {
++      picks.push_back(Pick{static_cast<uint32_t>(i), hash});
++    }
++  }
++  // A non-flat picture with no rate hit still changes, or two profiles of a
++  // short antialiased string could keep the same pixels.
++  if (picks.empty() && haveBest) {
++    picks.push_back(Pick{bestIndex, bestHash});
++  }
++  for (const Pick& pick : picks) {
++    Perturb(aData + static_cast<size_t>(pick.index) * 4, channels, pick.hash);
++  }
++}
++
++}  // namespace mozilla::dom
+diff --git a/dom/canvas/CanvasFingerprintManager.h b/dom/canvas/CanvasFingerprintManager.h
+new file mode 100644
+index 0000000..5a8b711
+--- /dev/null
++++ b/dom/canvas/CanvasFingerprintManager.h
+@@ -0,0 +1,31 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_dom_CanvasFingerprintManager_h
++#define mozilla_dom_CanvasFingerprintManager_h
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace mozilla::dom {
++
++// Sparse, stable noise on canvas readback. The algorithm is the one in
++// disguisebrowser.camoufox.canvas_noise.apply_noise; the unit test compiles
++// this file and checks the two stay identical.
++class CanvasFingerprintManager final {
++ public:
++  enum class ByteOrder : uint8_t { RGBA, BGRA };
++
++  // 0 means "off". The value is MaskConfig key "canvas:seed".
++  static uint32_t Seed();
++
++  // `aData` is a tightly packed width*height*4 copy that the caller is about
++  // to hand to the page. The canvas backing store is not touched.
++  static void ApplyNoise(uint8_t* aData, size_t aLength, uint32_t aSeed,
++                          ByteOrder aOrder);
++};
++
++}  // namespace mozilla::dom
++
++#endif  // mozilla_dom_CanvasFingerprintManager_h
+diff --git a/dom/canvas/CanvasRenderingContext2D.cpp b/dom/canvas/CanvasRenderingContext2D.cpp
+index 0553126..dbfbb65 100644
+--- a/dom/canvas/CanvasRenderingContext2D.cpp
++++ b/dom/canvas/CanvasRenderingContext2D.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "CanvasRenderingContext2D.h"
+ 
++#include "CanvasFingerprintManager.h"
++
+ #include <algorithm>
+ #include <numbers>
+ 
+@@ -2296,6 +2298,18 @@ UniquePtr<uint8_t[]> CanvasRenderingContext2D::GetImageBuffer(
+           out_imageSize->width * out_imageSize->height * 4,
+           SurfaceFormat::A8R8G8B8_UINT32);
+     }
++    // Profile noise on this returned copy. The snapshot was already given
++    // back, so drawImage keeps reading the clean canvas and the noise does
++    // not stack. BGRA matches SurfaceToPackedBGRA / HOSTARGB.
++    uint32_t canvasSeed = CanvasFingerprintManager::Seed();
++    if (canvasSeed != 0 && out_imageSize->width > 0 &&
++        out_imageSize->height > 0) {
++      CanvasFingerprintManager::ApplyNoise(
++          ret.get(),
++          static_cast<size_t>(out_imageSize->width) *
++              static_cast<size_t>(out_imageSize->height) * 4,
++          canvasSeed, CanvasFingerprintManager::ByteOrder::BGRA);
++    }
+   }
+ 
+   return ret;
+@@ -6806,6 +6820,20 @@ nsresult CanvasRenderingContext2D::GetImageDataArray(
+   } while (false);
+ 
+   readback->Unmap();
++
++  // Same noise as toDataURL, on the RGBA copy the page receives.
++  uint32_t canvasSeed = CanvasFingerprintManager::Seed();
++  if (canvasSeed != 0) {
++    JS::AutoCheckCannotGC nogc;
++    bool isShared = false;
++    uint8_t* bytes = JS_GetUint8ClampedArrayData(darray, &isShared, nogc);
++    if (bytes && !isShared) {
++      CanvasFingerprintManager::ApplyNoise(
++          bytes, len.value(), canvasSeed,
++          CanvasFingerprintManager::ByteOrder::RGBA);
++    }
++  }
++
+   *aRetval = darray;
+   return NS_OK;
+ }
+diff --git a/dom/canvas/ClientWebGLContext.cpp b/dom/canvas/ClientWebGLContext.cpp
+index 5aaa427..2f08247 100644
+--- a/dom/canvas/ClientWebGLContext.cpp
++++ b/dom/canvas/ClientWebGLContext.cpp
+@@ -46,6 +46,8 @@
+ #include "nsContentUtils.h"
+ #include "nsDisplayList.h"
+ 
++#include "CanvasFingerprintManager.h"
++
+ namespace mozilla {
+ 
+ namespace webgl {
+@@ -1298,6 +1300,12 @@ RefPtr<gfx::DataSourceSurface> ClientWebGLContext::BackBufferSnapshot() {
+     const auto pixels = Span<uint8_t>(map.GetData(), stride * size.y);
+     if (!DoReadPixels(desc, pixels)) return nullptr;
+ 
++    // GL order, before the y-flip toDataURL applies, so it matches readPixels.
++    // Defined further down, next to ReadPixels.
++    void NoiseWebGLReadback(uint8_t* bytes, size_t availBytes, int32_t width,
++                            int32_t height, GLenum format, GLenum type,
++                            const webgl::PixelPackingState& pack);
++    NoiseWebGLReadback(pixels.data(), pixels.size(),
++                       static_cast<int32_t>(size.x),
++                       static_cast<int32_t>(size.y), LOCAL_GL_RGBA,
++                       LOCAL_GL_UNSIGNED_BYTE, webgl::PixelPackingState{});
++
+     // RGBA->BGRA and flip-y.
+     MOZ_RELEASE_ASSERT(gfx::SwizzleYFlipData(
+         pixels.data(), stride, gfx::SurfaceFormat::R8G8B8A8, pixels.data(),
+@@ -5381,6 +5389,46 @@ void ClientWebGLContext::DrawElementsInstanced(GLenum mode, GLsizei count,
+   AfterDrawCall();
+ }
+ 
++
++// Profile noise for WebGL readback. Only tightly packed RGBA/BGRA bytes:
++// a row stride would make the pixel grid wrong. Same function as canvas 2D.
++void NoiseWebGLReadback(uint8_t* bytes, size_t availBytes, int32_t width,
++                        int32_t height, GLenum format, GLenum type,
++                        const webgl::PixelPackingState& pack) {
++  if (!bytes || type != LOCAL_GL_UNSIGNED_BYTE || width <= 0 || height <= 0) {
++    return;
++  }
++  dom::CanvasFingerprintManager::ByteOrder order;
++  if (format == LOCAL_GL_RGBA) {
++    order = dom::CanvasFingerprintManager::ByteOrder::RGBA;
++  } else if (format == LOCAL_GL_BGRA) {
++    order = dom::CanvasFingerprintManager::ByteOrder::BGRA;
++  } else {
++    return;
++  }
++  if (pack.skipPixels || pack.skipRows || pack.skipImages) {
++    return;
++  }
++  if (pack.rowLength != 0 && pack.rowLength != static_cast<uint32_t>(width)) {
++    return;
++  }
++  const uint32_t rowBytes = static_cast<uint32_t>(width) * 4u;
++  if (pack.alignmentInTypeElems == 0 ||
++      rowBytes % pack.alignmentInTypeElems != 0) {
++    return;
++  }
++  const size_t nbytes =
++      static_cast<size_t>(rowBytes) * static_cast<size_t>(height);
++  if (availBytes < nbytes) {
++    return;
++  }
++  const uint32_t seed = dom::CanvasFingerprintManager::Seed();
++  if (seed == 0) {
++    return;
++  }
++  dom::CanvasFingerprintManager::ApplyNoise(bytes, nbytes, seed, order);
++}
++
+ // ------------------------------ Readback -------------------------------
+ void ClientWebGLContext::ReadPixels(GLint x, GLint y, GLsizei width,
+                                     GLsizei height, GLenum format, GLenum type,
+@@ -5478,6 +5526,8 @@ void ClientWebGLContext::ReadPixels(GLint x, GLint y, GLsizei width,
+               alphaChannelOffset, hasAlphaChannel);
+         }
+       }
++      NoiseWebGLReadback(range->data(), range->size_bytes(), width, height,
++                         format, type, state.mPixelPackState);
+     }
+   });
+ }
+@@ -5657,6 +5707,11 @@ ClientWebGLContext::DoReadPixelsAsync() {
+             Memcpy(&destRow, srcRow);
+           }
+ 
++          NoiseWebGLReadback(pixels.data(), pixels.size(),
++                             static_cast<int32_t>(size.x),
++                             static_cast<int32_t>(size.y), LOCAL_GL_RGBA,
++                             LOCAL_GL_UNSIGNED_BYTE, webgl::PixelPackingState{});
++
+           // RGBA->BGRA and flip-y.
+           MOZ_RELEASE_ASSERT(gfx::SwizzleYFlipData(
+               pixels.data(), stride, gfx::SurfaceFormat::R8G8B8A8,
+diff --git a/dom/canvas/moz.build b/dom/canvas/moz.build
+index b5809a1..9b0440e 100644
+--- a/dom/canvas/moz.build
++++ b/dom/canvas/moz.build
+@@ -101,6 +101,7 @@ UNIFIED_SOURCES += [
+ ]
+ 
+ SOURCES += [
++    "CanvasFingerprintManager.cpp",  # MaskConfig.hpp; keep out of unified builds
+     "DrawTargetWebgl.cpp",  # Isolate Skia
+     "FilterNodeWebgl.cpp",
+     "ImageUtils.cpp",
+diff --git a/dom/canvas/ImageBitmap.cpp b/dom/canvas/ImageBitmap.cpp
+index 9d1ff05..d9ff465 100644
+--- a/dom/canvas/ImageBitmap.cpp
++++ b/dom/canvas/ImageBitmap.cpp
+@@ -976,6 +976,7 @@ UniquePtr<ImageBitmapCloneData> ImageBitmap::ToCloneData() const {
+   result->mAlphaType = mAlphaType;
+   result->mSurface = std::move(dataSurface);
+   result->mWriteOnly = mWriteOnly;
++  result->mReadbackNoised = mReadbackNoised;
+   return result;
+ }
+ 
+@@ -998,6 +999,7 @@ already_AddRefed<ImageBitmap> ImageBitmap::CreateFromCloneData(
+ 
+   ErrorResult rv;
+   ret->SetPictureRect(aData->mPictureRect, rv);
++  ret->mReadbackNoised = aData->mReadbackNoised;
+   return ret.forget();
+ }
+ 
+@@ -1023,6 +1025,10 @@ already_AddRefed<ImageBitmap> ImageBitmap::CreateFromOffscreenCanvas(
+   RefPtr<layers::Image> data = CreateImageFromSurface(surface);
+ 
+   RefPtr<ImageBitmap> ret = new ImageBitmap(aGlobal, data, true, writeOnly);
++  if (aOffscreenCanvas.GetContextType() == CanvasContextType::WebGL1 ||
++      aOffscreenCanvas.GetContextType() == CanvasContextType::WebGL2) {
++    ret->mReadbackNoised = true;
++  }
+ 
+   return ret.forget();
+ }
+@@ -1294,9 +1300,15 @@ already_AddRefed<ImageBitmap> ImageBitmap::CreateInternal(
+     mustCopy = true;
+   }
+ 
+-  return CreateImageBitmapInternal(aGlobal, surface, aCropRect, aOptions,
+-                                   writeOnly, needToReportMemoryAllocation,
+-                                   mustCopy, alphaType, aRv);
++  RefPtr<ImageBitmap> bitmap = CreateImageBitmapInternal(
++      aGlobal, surface, aCropRect, aOptions, writeOnly,
++      needToReportMemoryAllocation, mustCopy, alphaType, aRv);
++  if (bitmap &&
++      (aCanvasEl.GetCurrentContextType() == CanvasContextType::WebGL1 ||
++       aCanvasEl.GetCurrentContextType() == CanvasContextType::WebGL2)) {
++    bitmap->mReadbackNoised = true;
++  }
++  return bitmap.forget();
+ }
+ 
+ /* static */
+@@ -1345,9 +1357,15 @@ already_AddRefed<ImageBitmap> ImageBitmap::CreateInternal(
+        aOffscreenCanvas.GetContextType() == CanvasContextType::WebGL2 ||
+        aOffscreenCanvas.GetContextType() == CanvasContextType::WebGPU);
+ 
+-  return CreateImageBitmapInternal(aGlobal, surface, aCropRect, aOptions,
+-                                   writeOnly, needToReportMemoryAllocation,
+-                                   mustCopy, alphaType, aRv);
++  RefPtr<ImageBitmap> bitmap = CreateImageBitmapInternal(
++      aGlobal, surface, aCropRect, aOptions, writeOnly,
++      needToReportMemoryAllocation, mustCopy, alphaType, aRv);
++  if (bitmap &&
++      (aOffscreenCanvas.GetContextType() == CanvasContextType::WebGL1 ||
++       aOffscreenCanvas.GetContextType() == CanvasContextType::WebGL2)) {
++    bitmap->mReadbackNoised = true;
++  }
++  return bitmap.forget();
+ }
+ 
+ /* static */
+@@ -1524,9 +1542,13 @@ already_AddRefed<ImageBitmap> ImageBitmap::CreateInternal(
+     }
+   }
+ 
+-  return CreateImageBitmapInternal(
++  RefPtr<ImageBitmap> bitmap = CreateImageBitmapInternal(
+       aGlobal, surface, Some(cropRect), aOptions, aImageBitmap.mWriteOnly,
+       needToReportMemoryAllocation, false, alphaType, aRv);
++  if (bitmap) {
++    bitmap->mReadbackNoised = aImageBitmap.mReadbackNoised;
++  }
++  return bitmap.forget();
+ }
+ 
+ /* static */
+diff --git a/dom/canvas/ImageBitmap.h b/dom/canvas/ImageBitmap.h
+index 4246d59..e45998a 100644
+--- a/dom/canvas/ImageBitmap.h
++++ b/dom/canvas/ImageBitmap.h
+@@ -62,6 +62,7 @@ struct ImageBitmapCloneData final {
+   gfx::IntRect mPictureRect;
+   gfxAlphaType mAlphaType;
+   bool mWriteOnly;
++  bool mReadbackNoised = false;
+ };
+ 
+ /*
+@@ -147,6 +148,7 @@ class ImageBitmap final : public nsISupports, public nsWrapperCache {
+   void OnShutdown();
+ 
+   bool IsWriteOnly() const { return mWriteOnly; }
++  bool ReadbackNoised() const { return mReadbackNoised; }
+   bool IsClosed() const { return !mData; };
+ 
+  protected:
+@@ -277,6 +279,9 @@ class ImageBitmap final : public nsISupports, public nsWrapperCache {
+    * in the spec.
+    */
+   bool mWriteOnly;
++
++  // Pixels already passed through canvas readback noise (WebGL snapshot).
++  bool mReadbackNoised = false;
+ };
+ 
+ size_t BindingJSObjectMallocBytes(ImageBitmap* aBitmap);
+diff --git a/dom/canvas/ImageBitmapRenderingContext.cpp b/dom/canvas/ImageBitmapRenderingContext.cpp
+index ad8b181..9f43c66 100644
+--- a/dom/canvas/ImageBitmapRenderingContext.cpp
++++ b/dom/canvas/ImageBitmapRenderingContext.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "ImageBitmapRenderingContext.h"
+ 
++#include "CanvasFingerprintManager.h"
++
+ #include "ImageContainer.h"
+ #include "gfx2DGlue.h"
+ #include "gfxPlatform.h"
+@@ -70,6 +72,7 @@ void ImageBitmapRenderingContext::TransferImageBitmap(ImageBitmap& aImageBitmap,
+ 
+ void ImageBitmapRenderingContext::TransferFromImageBitmap(
+     ImageBitmap* aImageBitmap, ErrorResult& aRv) {
++  const bool readbackNoised = aImageBitmap && aImageBitmap->ReadbackNoised();
+   ResetBitmap();
+ 
+   if (aImageBitmap) {
+@@ -92,6 +95,8 @@ void ImageBitmapRenderingContext::TransferFromImageBitmap(
+       return;
+     }
+ 
++    mReadbackNoised = readbackNoised;
++
+     if (aImageBitmap->IsWriteOnly()) {
+       if (mCanvasElement) {
+         mCanvasElement->SetWriteOnly();
+@@ -206,6 +211,18 @@ mozilla::UniquePtr<uint8_t[]> ImageBitmapRenderingContext::GetImageBuffer(
+           data->GetSize().width * data->GetSize().height * 4,
+           gfx::SurfaceFormat::A8R8G8B8_UINT32);
+     }
++    // Same noise as canvas 2D toDataURL, on this packed copy only.
++    if (!mReadbackNoised && data->GetSize().width > 0 &&
++        data->GetSize().height > 0) {
++      const uint32_t canvasSeed = CanvasFingerprintManager::Seed();
++      if (canvasSeed != 0) {
++        CanvasFingerprintManager::ApplyNoise(
++            ret.get(),
++            static_cast<size_t>(data->GetSize().width) *
++                static_cast<size_t>(data->GetSize().height) * 4,
++            canvasSeed, CanvasFingerprintManager::ByteOrder::BGRA);
++      }
++    }
+   }
+   return ret;
+ }
+@@ -272,6 +289,7 @@ void ImageBitmapRenderingContext::ResetBitmap() {
+   }
+ 
+   mImage = nullptr;
++  mReadbackNoised = false;
+   mFrameCaptureState = FrameCaptureState::CLEAN;
+ }
+ 
+diff --git a/dom/canvas/ImageBitmapRenderingContext.h b/dom/canvas/ImageBitmapRenderingContext.h
+index 29fe8f4..5630cca 100644
+--- a/dom/canvas/ImageBitmapRenderingContext.h
++++ b/dom/canvas/ImageBitmapRenderingContext.h
+@@ -108,6 +108,8 @@ class ImageBitmapRenderingContext final
+   int32_t mHeight;
+ 
+   RefPtr<layers::Image> mImage;
++  // WebGL snapshot was already noised; toDataURL must not noise it again.
++  bool mReadbackNoised = false;
+ 
+   /**
+    * Flag to avoid unnecessary surface copies to FrameCaptureListeners in the
+diff --git a/dom/webgpu/CanvasContext.cpp b/dom/webgpu/CanvasContext.cpp
+index 2afcff0..1ade64c 100644
+--- a/dom/webgpu/CanvasContext.cpp
++++ b/dom/webgpu/CanvasContext.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "CanvasContext.h"
+ 
++#include "../canvas/CanvasFingerprintManager.h"
++#include "mozilla/dom/ImageEncoder.h"
++#include "nsComponentManagerUtils.h"
++
+ #include "LayerUserData.h"
+ #include "Utility.h"
+ #include "gfxUtils.h"
+@@ -345,39 +349,52 @@ mozilla::UniquePtr<uint8_t[]> CanvasContext::GetImageBuffer(
+   *out_imageSize = dataSurface->GetSize();
+ 
+   nsRFPService::PotentiallyDumpImage(PrincipalOrNull(), dataSurface);
++  UniquePtr<uint8_t[]> buffer;
+   if (ShouldResistFingerprinting(RFPTarget::CanvasRandomization)) {
+-    return gfxUtils::GetImageBufferWithRandomNoise(
++    buffer = gfxUtils::GetImageBufferWithRandomNoise(
+         dataSurface,
+         /* aIsAlphaPremultiplied */ true, GetCookieJarSettings(),
+         PrincipalOrNull(), &*out_format);
++  } else {
++    buffer = gfxUtils::GetImageBuffer(
++        dataSurface, /* aIsAlphaPremultiplied */ true, &*out_format);
++  }
++  if (buffer && out_imageSize->width > 0 && out_imageSize->height > 0) {
++    const uint32_t seed = dom::CanvasFingerprintManager::Seed();
++    if (seed != 0) {
++      dom::CanvasFingerprintManager::ApplyNoise(
++          buffer.get(),
++          static_cast<size_t>(out_imageSize->width) *
++              static_cast<size_t>(out_imageSize->height) *
++              static_cast<size_t>(4),
++          seed, dom::CanvasFingerprintManager::ByteOrder::BGRA);
++    }
+   }
+-
+-  return gfxUtils::GetImageBuffer(dataSurface, /* aIsAlphaPremultiplied */ true,
+-                                  &*out_format);
++  return buffer;
+ }
+ 
+ NS_IMETHODIMP CanvasContext::GetInputStream(
+     const char* aMimeType, const nsAString& aEncoderOptions,
+     mozilla::CanvasUtils::ImageExtraction aExtractionBehavior,
+     const nsACString& aRandomizationKey, nsIInputStream** aStream) {
+-  gfxAlphaType any;
+-  RefPtr<gfx::SourceSurface> snapshot = GetSurfaceSnapshot(&any);
+-  if (!snapshot) {
++  nsCString enccid("@mozilla.org/image/encoder;2?type=");
++  enccid += aMimeType;
++  nsCOMPtr<imgIEncoder> encoder = do_CreateInstance(enccid.get());
++  if (!encoder) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  RefPtr<gfx::DataSourceSurface> dataSurface = snapshot->GetDataSurface();
+-
+-  nsRFPService::PotentiallyDumpImage(PrincipalOrNull(), dataSurface);
+-  if (aExtractionBehavior == CanvasUtils::ImageExtraction::Randomize) {
+-    return gfxUtils::GetInputStreamWithRandomNoise(
+-        dataSurface, /* aIsAlphaPremultiplied */ true, aMimeType,
+-        aEncoderOptions, GetCookieJarSettings(), PrincipalOrNull(), aStream);
++  int32_t format = 0;
++  gfx::IntSize imageSize;
++  UniquePtr<uint8_t[]> imageBuffer =
++      GetImageBuffer(aExtractionBehavior, &format, &imageSize);
++  if (!imageBuffer) {
++    return NS_ERROR_FAILURE;
+   }
+ 
+-  return gfxUtils::GetInputStream(dataSurface, /* aIsAlphaPremultiplied */ true,
+-                                  aMimeType, aEncoderOptions, aRandomizationKey,
+-                                  aStream);
++  return dom::ImageEncoder::GetInputStream(
++      imageSize.width, imageSize.height, imageBuffer.get(), format, encoder,
++      aEncoderOptions, aRandomizationKey, aStream);
+ }
+ 
+ bool CanvasContext::GetIsOpaque() {

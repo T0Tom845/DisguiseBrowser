@@ -35,7 +35,7 @@ Chrome, `live` — `disguise test` по публичным детекторам,
 |---|---|---|---|---|---|
 | JA3/JA4, порядок HTTP/2 SETTINGS | TLS‑fingerprint | OK | системный Chrome, ничего не патчится | live (`tls`) | — |
 | `sec-ch-ua*` стёрты или не совпадают с UA | серверная проверка без JS | OK | политика запрещает UA‑override без `userAgentMetadata` (`cdp/policy.py`); в headed UA не трогаем | unit (policy), integ (`brands >= 2`) | — |
-| `Accept-Language` ≠ `navigator.languages` ≠ страна IP | сравнение заголовка, JS и гео | ЧАСТЬ | совпадение заголовка и JS всегда (`--lang` + prefs); со страной IP — только при `geoip=True` | integ | **включать `geoip` по умолчанию при любом прокси**; падать, если lookup не удался |
+| `Accept-Language` ≠ `navigator.languages` ≠ страна IP | сравнение заголовка, JS и гео | OK | заголовок и JS совпадают всегда (`--lang` + prefs). Прокси без явного `geoip=False` выравнивает таймзону и языки по exit‑IP (`wants_geoip`); неудачный lookup по‑прежнему роняет запуск. Профиль Camoufox хранит свой флаг и явные язык/таймзону | unit (`wants_geoip`), integ (`test_geoip_aligns_timezone_and_languages`) | привязка профиль ↔ прокси ↔ `seed`, чтобы один профиль не ходил с разных стран |
 | `HeadlessChrome` в UA, в т.ч. из воркеров | UA | ЧАСТЬ | headed — нет проблемы; в `headless=True` UA подменяется флагом | live (`tls`: UA), unit | в headless воркер‑UA не проверен |
 | Устаревшая версия Chrome | мажор UA | OK | всегда установленный системный Chrome; в Docker — stable на момент сборки | нет | пересобирать образ по расписанию |
 
@@ -63,7 +63,7 @@ Chrome, `live` — `disguise test` по публичным детекторам,
 | Нет WebGL (сервер без GPU) | `getContext('webgl') === null` | OK | Xvfb + GLX, `LIBGL_ALWAYS_SOFTWARE=1`, `--ignore-gpu-blocklist` | integ, live | — |
 | Renderer `SwiftShader` / `llvmpipe` | `UNMASKED_RENDERER_WEBGL` | OK | имя GPU через Mesa driconf (ADR‑5) | integ | см. две строки ниже |
 | **Имя GPU противоречит параметрам WebGL** (лимиты, расширения llvmpipe) | CreepJS, fingerprint.com сверяют renderer с `MAX_*`, extensions | НЕТ | подменяется только строка | нет | на сервере без GPU честный llvmpipe (слабее, но не противоречив), либо virgl/патч (фаза 4) |
-| **Одинаковые canvas/audio/WebGL‑хэши у всех сессий сервера** | кластеризация | НЕТ | хэши от llvmpipe/софт‑аудио, у всех одинаковые; имя GPU на них не влияет | нет | инструмент замера: N сессий → число различных хэшей (`disguise test --sessions N`); развести можно только другим GL‑стеком или патчем |
+| **Одинаковые canvas/audio/WebGL‑хэши у всех сессий сервера** | кластеризация | НЕТ | хэши от llvmpipe/софт‑аудио, у всех одинаковые; имя GPU на них не влияет. У Camoufox сид `canvas:seed` уже уходит в запуск, но официальный бинарник его не читает | нет | патч `fork/camoufox/zz-canvas-readback.patch` разводит пиксели canvas и `readPixels` WebGL после одной пересборки; замер «N сессий → k хэшей» всё ещё не сделан |
 | `hardwareConcurrency`, `deviceMemory` одинаковы у всех сессий | JS | НЕТ | берутся из ОС хоста | нет | отдельные контейнеры с разной CPU‑квотой; проверить, что Chrome видит квоту, а не хост |
 | Экран всегда 1920×1080, DPR 1 на виртуальном дисплее | `screen.*`, `devicePixelRatio` | ЧАСТЬ | размер — из персоны (по умолчанию 1920×1080, DPR 1) | integ (геометрия) | выбирать из реального распределения разрешений по `seed`; DPR 1.25/1.5 через `-dpi`/scale |
 | `availHeight == height` (нет панели) | `screen.avail*` | OK | `_NET_WORKAREA`: от WM+tint2 либо публикуем сами | integ, live (dabi) | высота панели tint2 жёстко 32 px — брать из `Persona.work_area()` |
@@ -131,8 +131,8 @@ Chrome, `live` — `disguise test` по публичным детекторам,
 
 ## Порядок закрытия
 
-1. `geoip` по умолчанию при прокси и привязка профиль ↔ прокси ↔ `seed` (L1, L4). Это ломает
-   «мета не совпадает» сразу для всех.
+1. Привязка профиль ↔ прокси ↔ `seed` (L4): `geoip` при прокси уже включён по умолчанию.
+   Осталось не давать одному профилю менять страну между запусками.
 2. Инструмент уникальности сессий (измеримость). Без него пункты 3–5 нельзя оценить.
 3. Распределение разрешений и панель из персоны, fontconfig по языку (L3).
 4. Честный llvmpipe на серверах без GPU вместо противоречивого имени; аудиовыход в образе (L3).

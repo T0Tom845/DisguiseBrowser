@@ -20,6 +20,7 @@ import contextlib
 import json
 import random
 import re
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -29,7 +30,21 @@ from playwright.async_api import Error as PwError
 from playwright.async_api import Page as PwPage
 from playwright.async_api import TimeoutError as PwTimeout
 
-from disguisebrowser.errors import ElementNotFoundError, EvaluationError, NavigationError
+from disguisebrowser.errors import (
+    DisguiseError,
+    ElementNotFoundError,
+    EvaluationError,
+    NavigationError,
+)
+from disguisebrowser.exchange import (
+    Download,
+    HttpResponse,
+    JsDialog,
+    Pending,
+    ResponseLog,
+    existing_files,
+    safe_filename,
+)
 from disguisebrowser.input import PRESETS, HumanProfile
 from disguisebrowser.input.humanizer import scroll_steps, typing_delays
 from disguisebrowser.protocols import WaitUntil, World
@@ -112,16 +127,58 @@ class CamoufoxPage:
         self._rng = rng or random.Random()
         self.keyboard = CamoufoxKeyboard(self)
         self.dialog_action: Literal["dismiss", "accept"] = "dismiss"
+        self.dialog_prompt = ""
+        self._dialog_future: asyncio.Future[JsDialog] | None = None
+        self._open_dialog: JsDialog | None = None
+        self._responses = ResponseLog()
         page.on("dialog", self._on_dialog)
 
     async def _on_dialog(self, dialog: Any) -> None:
+        async def reply(accept: bool, prompt_text: str | None) -> None:
+            try:
+                if accept:
+                    await dialog.accept(prompt_text or "")
+                else:
+                    await dialog.dismiss()
+            except PwError:
+                pass
+
+        wrapped = JsDialog(
+            type=str(dialog.type),
+            message=str(dialog.message),
+            default_value=str(dialog.default_value or ""),
+            reply=reply,
+        )
+        waiting = self._dialog_future
+        if waiting is not None and not waiting.done():
+            self._open_dialog = wrapped
+            waiting.set_result(wrapped)
+            return
         try:
             if self.dialog_action == "accept":
-                await dialog.accept()
+                await wrapped.accept(self.dialog_prompt or None)
             else:
-                await dialog.dismiss()
-        except PwError:  # already handled or page gone
+                await wrapped.dismiss()
+        except (DisguiseError, PwError):
             pass
+
+    @contextlib.asynccontextmanager
+    async def expect_dialog(self, *, timeout: float = 5.0) -> Any:
+        """See :meth:`disguisebrowser.page.Page.expect_dialog`."""
+        if self._dialog_future is not None:
+            raise DisguiseError("already waiting for a dialog")
+        future: asyncio.Future[JsDialog] = asyncio.get_running_loop().create_future()
+        self._dialog_future = future
+        try:
+            yield Pending(future, timeout, "a JavaScript dialog")
+        finally:
+            self._dialog_future = None
+            dialog = self._open_dialog
+            self._open_dialog = None
+            if not future.done():
+                future.cancel()
+            elif dialog is not None and not dialog.handled:
+                await dialog.dismiss()
 
     # ------------------------------------------------------------------ state
     @property
@@ -383,6 +440,72 @@ class CamoufoxPage:
             await asyncio.to_thread(Path(path).write_bytes, data)
         return data
 
+    async def watch_responses(self) -> None:
+        """Start passive capture. Playwright's response listener does not intercept."""
+        if self._responses.enabled:
+            return
+        self._page.on("response", self._on_response)
+        self._responses.enabled = True
+
+    def responses(self) -> list[HttpResponse]:
+        return list(self._responses.entries)
+
+    def _on_response(self, response: Any) -> None:
+        request = response.request
+
+        async def read() -> bytes:
+            return bytes(await response.body())
+
+        self._responses.add(
+            HttpResponse(
+                url=str(response.url),
+                method=str(request.method),
+                status=int(response.status),
+                resource_type=str(request.resource_type),
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                reader=read,
+            )
+        )
+
+    @contextlib.asynccontextmanager
+    async def expect_response(self, url_contains: str, *, timeout: float = 30.0) -> Any:
+        await self.watch_responses()
+        future = self._responses.expect(url_contains)
+        try:
+            yield Pending(future, timeout, f"a response containing {url_contains!r}")
+        finally:
+            self._responses.cancel(future)
+
+    @contextlib.asynccontextmanager
+    async def expect_download(self, *, timeout: float = 30.0) -> Any:
+        future: asyncio.Future[Download] = asyncio.get_running_loop().create_future()
+        async with self._page.expect_download(timeout=timeout * 1000) as info:
+
+            async def resolve() -> None:
+                try:
+                    raw = await info.value
+                    directory = Path(tempfile.mkdtemp(prefix="disguise-dl-"))
+                    target = directory / safe_filename(str(raw.suggested_filename))
+                    await raw.save_as(target)
+                    if not future.done():
+                        future.set_result(
+                            Download(
+                                url=str(raw.url),
+                                suggested_filename=str(raw.suggested_filename),
+                                path=target,
+                            )
+                        )
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+
+            task = asyncio.create_task(resolve())
+            try:
+                yield Pending(future, timeout, "a download")
+            finally:
+                if not future.done():
+                    task.cancel()
+
     async def cookies(self, *urls: str) -> list[dict[str, Any]]:
         return [dict(c) for c in await self._page.context.cookies(list(urls))]
 
@@ -480,6 +603,12 @@ class CamoufoxElement:
     ) -> None:
         async with _errors("click"):
             await self._handle.click(button=button)
+
+    async def set_input_files(self, *paths: str | Path) -> None:
+        """Set the files of an ``<input type="file">``. Pass nothing to clear it."""
+        files = await asyncio.to_thread(existing_files, paths)
+        async with _errors("set input files"):
+            await self._handle.set_input_files(files)
 
     async def type(self, text: str, *, humanize: bool = True, clear: bool = False) -> None:
         await self.click(humanize=humanize)

@@ -38,9 +38,39 @@ def test_pinned_fpgen_profile_sets_fingerprint_and_os() -> None:
     options = _options(profile=profile)
     assert options["fingerprint"] == IDENTITY
     assert "fingerprint_preset" not in options
+    assert "screen.width" not in options["config"]
     assert options["os"] == "windows"
     assert options["persistent_context"] is True
     assert options["user_data_dir"] == "/tmp/x"
+
+
+def test_chosen_screen_is_sent_as_camoufox_geometry() -> None:
+    identity = {
+        "navigator": {"userAgent": "x"},
+        "screen": {
+            "width": 1366,
+            "height": 768,
+            "availWidth": 1366,
+            "availHeight": 728,
+            "colorDepth": 24,
+        },
+        "window": {"outerWidth": 1200, "outerHeight": 700, "screenX": 10, "screenY": 20},
+    }
+    profile = Profile(
+        name="p",
+        os="windows",
+        kind="fpgen",
+        identity=identity,
+        screen_width=1366,
+        screen_height=768,
+    )
+    config = _options(profile=profile)["config"]
+    assert config["screen.width"] == 1366
+    assert config["screen.height"] == 768
+    assert config["screen.availHeight"] == 728
+    assert config["window.outerWidth"] == 1200
+    assert config["window.screenX"] == 10
+    assert config["screen.colorDepth"] == 24
 
 
 def test_pinned_preset_profile_uses_the_preset_key() -> None:
@@ -54,6 +84,24 @@ def test_ephemeral_run_has_no_pinned_identity() -> None:
     options = _options(os_name="linux")
     assert "fingerprint" not in options
     assert options["os"] == "linux"
+
+
+def test_canvas_seed_is_stable_for_a_pinned_profile_and_different_for_another() -> None:
+    profile = Profile(name="p", os="windows", kind="fpgen", identity=IDENTITY)
+    options = _options(profile=profile)
+    again = _options(profile=profile)
+    assert options["config"]["canvas:seed"] == again["config"]["canvas:seed"]
+    assert options["config"]["canvas:seed"] != 0
+
+    other = {**IDENTITY, "navigator": {"userAgent": "other"}}
+    other_options = _options(profile=Profile(name="q", os="windows", kind="fpgen", identity=other))
+    assert other_options["config"]["canvas:seed"] != options["config"]["canvas:seed"]
+
+
+def test_ephemeral_launch_still_sends_a_canvas_seed() -> None:
+    seed = _options()["config"]["canvas:seed"]
+    assert isinstance(seed, int)
+    assert 1 <= seed <= 0xFFFFFFFF
 
 
 def test_locale_and_timezone_follow_the_persona() -> None:

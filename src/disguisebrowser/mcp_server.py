@@ -134,7 +134,7 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
     async def browser_launch(  # noqa: PLR0917 — MCP tool parameters are keyword arguments
         label: str = "",
         proxy: str | None = None,
-        geoip: bool = False,
+        geoip: bool | None = None,
         timezone: str | None = None,
         languages: str | None = None,
         gpu: str | None = None,
@@ -167,7 +167,7 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
                 os=os,
                 persona=Persona.from_host(**overrides) if overrides else None,
                 proxy=proxy,
-                geoip=True if geoip else None,
+                geoip=geoip,
                 human=human,
                 display=display,
             )
@@ -329,6 +329,72 @@ def build_server(sessions: BrowserSessions | None = None) -> MCPServer:  # noqa:
         snap = await page.snapshot(max_lines=max_lines)
         header = f"url: {page.url}\ntitle: {await page.title()}\n"
         return header + (snap.text or "(empty accessibility tree)")
+
+    @tool(
+        description="How to answer alert/confirm/prompt when the caller is not waiting on one. "
+        "prompt_text is sent when action is accept and the dialog is a prompt."
+    )
+    async def set_dialogs(
+        session_id: str,
+        action: Literal["accept", "dismiss"] = "dismiss",
+        prompt_text: str = "",
+    ) -> str:
+        page = await registry.page(session_id)
+        page.dialog_action = action
+        page.dialog_prompt = prompt_text
+        return f"dialogs will be {action}ed"
+
+    @tool(
+        description="Turn on passive HTTP capture (nothing is intercepted or rewritten) "
+        "and list responses seen since it was turned on."
+    )
+    async def list_responses(session_id: str, url_contains: str = "") -> list[dict[str, Any]]:
+        page = await registry.page(session_id)
+        await page.watch_responses()
+        rows = page.responses()
+        if url_contains:
+            rows = [row for row in rows if url_contains in row.url]
+        return [
+            {"url": row.url, "method": row.method, "status": row.status, "type": row.resource_type}
+            for row in rows[-50:]
+        ]
+
+    @tool(description="Text body of the latest captured response whose URL contains url_contains.")
+    async def response_body(session_id: str, url_contains: str, max_chars: int = 20000) -> str:
+        page = await registry.page(session_id)
+        await page.watch_responses()
+        matches = [row for row in page.responses() if url_contains in row.url]
+        if not matches:
+            raise DisguiseError(f"no captured response contains {url_contains!r}")
+        text = await matches[-1].text()
+        return text[:max_chars] + ("\n…[truncated]" if len(text) > max_chars else "")
+
+    @tool(description="Put a local file into an <input type=file> (ref or CSS selector).")
+    async def upload_file(session_id: str, target: str, path: str) -> str:
+        page = await registry.page(session_id)
+        await (await _resolve_target(page, target)).set_input_files(path)
+        return f"set {path} on {target}"
+
+    @tool(
+        description="Click a ref or CSS selector that starts a download, wait for the file, "
+        "and return its name, size and text when the bytes are UTF-8."
+    )
+    async def download_file(session_id: str, target: str, timeout: float = 30) -> dict[str, Any]:
+        page = await registry.page(session_id)
+        async with page.expect_download(timeout=timeout) as pending:
+            await (await _resolve_target(page, target)).click()
+        download = await pending.value()
+        data = download.path.read_bytes()
+        try:
+            text: str | None = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        return {
+            "filename": download.suggested_filename,
+            "bytes": len(data),
+            "path": str(download.path),
+            "text": text,
+        }
 
     @tool(description="Humanized click on a ref (e.g. e12) or CSS selector.")
     async def click(session_id: str, target: str) -> str:

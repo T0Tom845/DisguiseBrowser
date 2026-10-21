@@ -9,6 +9,7 @@ Playwright/Juggler) satisfy it, so the layers above never branch on the engine.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     import random
 
     from disguisebrowser.display import VirtualDisplay
+    from disguisebrowser.exchange import Download, HttpResponse, JsDialog, Pending
     from disguisebrowser.persona import Persona
     from disguisebrowser.proxy import GeoInfo, ProxyGateway
     from disguisebrowser.snapshot import Snapshot
@@ -36,10 +38,14 @@ class ElementLike(Protocol):
     async def hover(self, *, humanize: bool = True) -> None: ...
     async def click(self, *, humanize: bool = True) -> None: ...
     async def type(self, text: str, *, humanize: bool = True, clear: bool = False) -> None: ...
+    async def set_input_files(self, *paths: str | Path) -> None: ...
 
 
 @runtime_checkable
 class PageLike(Protocol):
+    dialog_action: Literal["dismiss", "accept"]
+    dialog_prompt: str
+
     @property
     def url(self) -> str: ...
     @property
@@ -71,6 +77,17 @@ class PageLike(Protocol):
     async def content(self) -> str: ...
     async def title(self) -> str: ...
     async def scroll(self, delta_y: float, *, humanize: bool = True) -> None: ...
+    def expect_dialog(
+        self, *, timeout: float = 5.0
+    ) -> AbstractAsyncContextManager[Pending[JsDialog]]: ...
+    async def watch_responses(self) -> None: ...
+    def responses(self) -> list[HttpResponse]: ...
+    def expect_response(
+        self, url_contains: str, *, timeout: float = 30.0
+    ) -> AbstractAsyncContextManager[Pending[HttpResponse]]: ...
+    def expect_download(
+        self, *, timeout: float = 30.0
+    ) -> AbstractAsyncContextManager[Pending[Download]]: ...
     async def screenshot(
         self,
         path: str | Path | None = None,

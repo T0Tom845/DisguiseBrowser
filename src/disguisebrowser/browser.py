@@ -10,6 +10,8 @@ import logging
 import os
 import random
 import secrets
+import shutil
+import tempfile
 from collections.abc import Generator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,6 +21,7 @@ from urllib.parse import urlsplit
 from disguisebrowser.cdp import Connection, QuietCdpPolicy, Session
 from disguisebrowser.display import VirtualDisplay
 from disguisebrowser.errors import CdpError, ConnectionClosedError, EvaluationError, LaunchError
+from disguisebrowser.exchange import Download, wants_geoip
 from disguisebrowser.input import PRESETS, HumanProfile
 from disguisebrowser.input.devices import CdpInputBackend, InputBackend
 from disguisebrowser.input.xtest import XTestInputBackend
@@ -95,6 +98,9 @@ class Browser:
         self._page_futures: dict[str, asyncio.Future[Page]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
+        self._download_dir: Path | None = None
+        self._download_waiters: list[asyncio.Future[Download]] = []
+        self._download_meta: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ setup
     @property
@@ -353,6 +359,70 @@ class Browser:
                 await self.display.stop()
             if self.gateway is not None:
                 await self.gateway.stop()
+        if self._download_dir is not None:
+            shutil.rmtree(self._download_dir, ignore_errors=True)
+
+    async def arm_download(self) -> asyncio.Future[Download]:
+        """Allow a download and return a future for the next completed file.
+
+        ``Browser.setDownloadBehavior`` only listens; it does not intercept the
+        request. The saved name is the download's GUID so two files cannot
+        overwrite each other. Register the future before the click.
+        """
+        if self._download_dir is None:
+            directory = Path(tempfile.mkdtemp(prefix="disguise-dl-"))
+            self._download_dir = directory
+            self.root.on("Browser.downloadWillBegin", self._on_download_begin)
+            self.root.on("Browser.downloadProgress", self._on_download_progress)
+            await self.root.send(
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allowAndName",
+                    "downloadPath": str(directory),
+                    "eventsEnabled": True,
+                },
+            )
+        future: asyncio.Future[Download] = asyncio.get_running_loop().create_future()
+        self._download_waiters.append(future)
+        return future
+
+    def _on_download_begin(self, params: dict[str, Any]) -> None:
+        self._download_meta[str(params.get("guid", ""))] = params
+
+    def _on_download_progress(self, params: dict[str, Any]) -> None:
+        state = params.get("state")
+        guid = str(params.get("guid", ""))
+        if state == "inProgress":
+            return
+        meta = self._download_meta.pop(guid, {})
+        if not self._download_waiters:
+            return
+        waiter = self._download_waiters.pop(0)
+        if waiter.done():
+            return
+        if state != "completed" or self._download_dir is None:
+            waiter.set_exception(LaunchError(f"download {guid or '?'} {state or 'failed'}"))
+            return
+        path = self._locate_download(guid, str(meta.get("suggestedFilename") or ""))
+        waiter.set_result(
+            Download(
+                url=str(meta.get("url") or ""),
+                suggested_filename=str(meta.get("suggestedFilename") or path.name),
+                path=path,
+            )
+        )
+
+    def _locate_download(self, guid: str, suggested: str) -> Path:
+        assert self._download_dir is not None
+        named = self._download_dir / guid
+        if named.is_file():
+            return named
+        if suggested:
+            alt = self._download_dir / suggested
+            if alt.is_file():
+                return alt
+        files = [p for p in self._download_dir.iterdir() if p.is_file()]
+        return files[-1] if files else named
 
     async def __aenter__(self) -> Browser:
         return self
@@ -402,7 +472,7 @@ def launch(
     args: tuple[str, ...] | list[str] = (),
     human: str | HumanProfile = "default",
     input: InputMode = "auto",
-    geoip: bool = False,
+    geoip: bool | None = None,
     proxy_gateway: bool = True,
     window_manager: bool = True,
     unsafe: bool = False,
@@ -419,8 +489,10 @@ def launch(
     DevTools ``Input.*``; ``"auto"`` picks XTest on a virtual display.
 
     ``geoip``: resolve the proxy's exit IP and align timezone and languages of
-    the persona with it (requires ``persona.proxy``). ``proxy_gateway=False``
-    hands the proxy URL to Chrome directly (credentials are then impossible).
+    the persona with it. ``None`` (the default) does this whenever
+    ``persona.proxy`` is set; pass ``False`` to keep the host timezone behind a
+    proxy. ``proxy_gateway=False`` hands the proxy URL to Chrome directly
+    (credentials are then impossible).
 
     Usage::
 
@@ -440,8 +512,11 @@ def launch(
         try:
             # 1. Proxy gateway and geo alignment come first: the persona
             #    (timezone/languages) must be final before Chrome starts.
+            chosen_persona = persona or Persona.from_host()
             chosen, gateway, geo, proxy_server = await _prepare_proxy(
-                persona or Persona.from_host(), geoip=geoip, use_gateway=proxy_gateway
+                chosen_persona,
+                geoip=wants_geoip(geoip, has_proxy=bool(chosen_persona.proxy)),
+                use_gateway=proxy_gateway,
             )
             if gateway is not None:
                 cleanup.append(gateway.stop)

@@ -56,9 +56,14 @@ async def fox(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Camoufo
 
 @pytest.fixture
 async def page(fox: CamoufoxBrowser) -> AsyncIterator[PageLike]:
+    from tests.conftest import screenshot_on_failure  # noqa: PLC0415
+
     tab = await fox.new_page()
     try:
         yield tab
+    except Exception:
+        await screenshot_on_failure(tab)
+        raise
     finally:
         await tab.close()
 
@@ -216,6 +221,30 @@ async def test_startup_failure_releases_the_profile_lock(tmp_path: Path) -> None
         )
     with store.lock("p"):  # would raise if the failed start had leaked the lock
         pass
+
+
+async def test_dialogs_responses_files_and_downloads(page: PageLike, fixture_server: str) -> None:
+    await page.goto(f"{fixture_server}/exchange.html")
+    async with page.expect_dialog() as pending:
+        await page.click("#prompt", humanize=False)
+        dialog = await pending.value()
+        await dialog.accept("ada")
+    assert await page.evaluate("document.querySelector('#out').textContent") == "ada"
+
+    async with page.expect_response("payload.json") as pending:
+        await page.click("#fetch", humanize=False)
+        response = await pending.value()
+    assert await response.json() == {"ok": True, "n": 1}
+
+    field = await page.query("#file")
+    assert field is not None
+    await field.set_input_files(Path(__file__).parents[1] / "fixtures" / "sample.txt")
+    assert await page.evaluate("document.querySelector('#file-name').textContent") == "sample.txt"
+
+    async with page.expect_download() as pending:
+        await page.click("#download", humanize=False)
+        download = await pending.value()
+    assert download.path.read_text(encoding="utf-8") == "sample-ok\n"
 
 
 # ---------------------------------------------------------------------- MCP

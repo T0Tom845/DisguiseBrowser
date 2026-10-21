@@ -14,7 +14,9 @@ from disguisebrowser.camoufox.profiles import (
     Profile,
     ProfileError,
     ProfileStore,
+    apply_screen,
     default_root,
+    geometry_config,
     os_of_user_agent,
     validate_name,
 )
@@ -83,6 +85,87 @@ def test_create_validates_inputs(store: ProfileStore) -> None:
     assert not store.exists("p")
 
 
+def test_screen_choice_rewrites_geometry_and_keeps_the_device(store: ProfileStore) -> None:
+    original = {
+        "navigator": {"userAgent": "same-browser"},
+        "screen": {
+            "width": 1920,
+            "height": 1080,
+            "availWidth": 1920,
+            "availHeight": 1040,
+            "colorDepth": 24,
+            "orientation": {"type": "landscape-primary", "angle": 0},
+        },
+        "window": {
+            "outerWidth": 1920,
+            "outerHeight": 1040,
+            "innerWidth": 1900,
+            "innerHeight": 1000,
+            "screenX": 0,
+            "screenY": 0,
+        },
+    }
+    created = store.create("p", os="windows", screen="2560x1440")
+    assert created.screen_width == 2560
+    assert created.identity["screen"]["width"] == 2560
+    assert created.identity["screen"]["availHeight"] == 1440 - 40
+    assert created.identity["navigator"]["userAgent"].startswith("Mozilla")
+
+    fitted = apply_screen(original, 2560, 1440, os_name="windows")
+    assert original["screen"]["width"] == 1920
+    assert fitted["screen"]["availWidth"] == 2560
+    assert fitted["screen"]["availHeight"] == 1400
+    assert fitted["window"]["outerWidth"] == 2560
+    assert fitted["window"]["outerHeight"] == 1400
+    assert fitted["window"]["innerWidth"] == 2540
+    assert fitted["window"]["innerHeight"] == 1360
+    assert fitted["navigator"]["userAgent"] == "same-browser"
+    again = apply_screen(fitted, 2560, 1440, os_name="windows")
+    assert again["screen"] == fitted["screen"]
+    assert again["window"] == fitted["window"]
+
+    windowed = apply_screen(
+        {
+            **original,
+            "window": {"outerWidth": 1280, "outerHeight": 720, "screenX": 100, "screenY": 40},
+        },
+        2560,
+        1440,
+        os_name="windows",
+    )
+    assert windowed["window"]["outerWidth"] == 1280
+    assert windowed["window"]["screenX"] == 100
+
+    with pytest.raises(ProfileError, match="not a plausible"):
+        store.create("tiny", screen="100x100")
+    with pytest.raises(ProfileError, match="start_url must be"):
+        store.create("web", start_url="javascript:alert(1)")
+
+    same = store.create("same", os="windows")
+    pinned = store.update("same", screen="1920x1080")
+    assert pinned.screen_width == 1920
+    assert pinned.identity["screen"] == same.identity["screen"]
+    grown = store.update("same", screen="1680x1050")
+    assert grown.identity["screen"]["height"] == 1050
+    assert grown.identity["navigator"]["userAgent"] == same.identity["navigator"]["userAgent"]
+    assert geometry_config(grown)["screen.height"] == 1050
+    assert geometry_config(same) == {}
+
+
+def test_old_profile_without_screen_choice_still_loads(store: ProfileStore) -> None:
+    store.create("p", start_url="https://example.com")
+    file = store.path("p") / "profile.json"
+    data = json.loads(file.read_text())
+    data.pop("screen_width")
+    data.pop("screen_height")
+    data.pop("start_url")
+    file.write_text(json.dumps(data))
+    loaded = store.load("p")
+    assert loaded.screen_width is None
+    assert loaded.screen_height is None
+    assert loaded.start_url is None
+
+
 def test_update_changes_network_not_device(store: ProfileStore) -> None:
     before = store.create("p", os="windows")
     after = store.update("p", timezone="Europe/Berlin", languages=("de-DE", "de"), notes="x")
@@ -135,6 +218,17 @@ def test_lock_is_exclusive_and_blocks_delete(store: ProfileStore) -> None:
         with pytest.raises(ProfileError, match="in use"):
             store.delete("p")
     store.delete("p")  # released
+
+
+def test_in_use_sees_the_lock_without_releasing_it(store: ProfileStore) -> None:
+    store.create("p")
+    assert store.in_use("p") is False
+    with store.lock("p"):
+        assert store.in_use("p") is True
+        with pytest.raises(ProfileError, match="in use"), store.lock("p"):
+            pass
+    assert store.in_use("p") is False
+    assert store.in_use("missing") is False
 
 
 def test_load_unknown_profile(store: ProfileStore) -> None:

@@ -1,4 +1,4 @@
-"""``disguise`` command line: doctor, test (scorecard), capture/diff, warmup, open, profile, mcp."""
+"""Command line: doctor, test, capture, diff, warmup, open, profile, manager, mcp."""
 
 from __future__ import annotations
 
@@ -240,7 +240,7 @@ def _launch_camoufox(args: argparse.Namespace) -> LaunchHandle[Any]:
         os=args.os,
         persona=Persona.from_host(**overrides) if overrides else None,
         proxy=args.proxy,
-        geoip=True if args.geoip else None,
+        geoip=args.geoip,
         display=args.display,
         headless=args.headless,
         human=args.human,
@@ -251,7 +251,7 @@ def _launch(args: argparse.Namespace) -> LaunchHandle[Any]:
     """Start the engine chosen by ``--engine``; the callers only use ``BrowserLike``."""
     if args.engine == "camoufox":
         return _launch_camoufox(args)
-    for dest, flag in (("create", "--create"), ("os", "--os"), ("geoip", "--geoip")):
+    for dest, flag in (("create", "--create"), ("os", "--os")):
         if getattr(args, dest, None):
             raise DisguiseError(f"{flag} applies to --engine camoufox only")
     return launch(
@@ -260,6 +260,7 @@ def _launch(args: argparse.Namespace) -> LaunchHandle[Any]:
         headless=args.headless,
         user_data_dir=args.profile,
         human=args.human,
+        geoip=args.geoip,
     )
 
 
@@ -414,7 +415,11 @@ def _add_launch_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--os", choices=OSES, help="camoufox: device OS for a new profile")
     parser.add_argument(
-        "--geoip", action="store_true", help="camoufox: align timezone/locale/geo to the proxy exit"
+        "--geoip",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="align timezone and languages to the proxy exit "
+        "(default: on when a proxy is set; a stored camoufox profile keeps its own flag)",
     )
     parser.add_argument("--human", choices=sorted(PRESETS), default="default")
     parser.add_argument(
@@ -443,7 +448,17 @@ def _print_profile(profile: Profile, *, as_json: bool) -> None:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
     print(f"{summary['name']}  [{summary['os']}/{summary['kind']}]")
-    for key in ("user_agent", "screen", "gpu", "cores", "proxy", "geoip", "languages", "timezone"):
+    for key in (
+        "user_agent",
+        "screen",
+        "gpu",
+        "cores",
+        "proxy",
+        "geoip",
+        "languages",
+        "timezone",
+        "start_url",
+    ):
         if summary[key] not in (None, "", False):
             print(f"  {key:<11} {summary[key]}")
     if profile.notes:
@@ -463,6 +478,8 @@ def _profile_create(args: argparse.Namespace) -> int:
             languages=tuple(args.lang.split(",")) if args.lang else None,
             timezone=args.timezone,
             notes=args.notes,
+            screen=args.screen,
+            start_url=args.start_url,
         )
     except ProfileError as exc:
         raise DisguiseError(str(exc)) from None
@@ -508,8 +525,14 @@ def _profile_set(args: argparse.Namespace) -> int:
         changes["timezone"] = args.timezone or None
     if args.notes is not None:
         changes["notes"] = args.notes
+    if args.screen is not None:
+        changes["screen"] = args.screen
+    if args.start_url is not None:
+        changes["start_url"] = args.start_url
     if not changes:
-        raise DisguiseError("nothing to change: pass --proxy/--geoip/--lang/--timezone/--notes")
+        raise DisguiseError(
+            "nothing to change: pass --proxy/--geoip/--lang/--timezone/--notes/--screen/--start-url"
+        )
     try:
         profile = _store(args).update(args.name, **changes)
     except ProfileError as exc:
@@ -555,6 +578,8 @@ def _add_profile_commands(sub: Any) -> None:
     create.add_argument("--geoip", action="store_true", help="align locale/timezone to the proxy")
     create.add_argument("--lang", help="comma-separated languages")
     create.add_argument("--timezone")
+    create.add_argument("--screen", help="WIDTHxHEIGHT, for example 1920x1080")
+    create.add_argument("--start-url", help="page to open with this profile")
     create.add_argument("--notes", default="")
     create.add_argument("--json", action="store_true")
     create.set_defaults(func=_profile_create)
@@ -570,7 +595,8 @@ def _add_profile_commands(sub: Any) -> None:
     show.set_defaults(func=_profile_show)
 
     update = actions.add_parser(
-        "set", help="change network settings (the device itself is never rerolled)"
+        "set",
+        help="change proxy, locale, notes, screen or the start page (the device is not rerolled)",
     )
     update.add_argument("name")
     update.add_argument("--proxy", help="'' clears it")
@@ -578,12 +604,31 @@ def _add_profile_commands(sub: Any) -> None:
     update.add_argument("--lang", help="'' clears it")
     update.add_argument("--timezone", help="'' clears it")
     update.add_argument("--notes")
+    update.add_argument("--screen", help="WIDTHxHEIGHT; takes effect on the next launch")
+    update.add_argument("--start-url", help="page to open with this profile; '' clears it")
     update.set_defaults(func=_profile_set)
 
     delete = actions.add_parser("delete", help="remove a profile with its cookies and storage")
     delete.add_argument("name")
     delete.add_argument("-y", "--yes", action="store_true")
     delete.set_defaults(func=_profile_delete)
+
+
+def _cmd_manager(args: argparse.Namespace) -> int:
+    from disguisebrowser.manager import serve_manager  # noqa: PLC0415
+
+    try:
+        return asyncio.run(
+            serve_manager(
+                store=_store(args),
+                host=args.host,
+                port=args.port,
+                display=args.display,
+                open_browser=not args.no_open,
+            )
+        )
+    except KeyboardInterrupt:
+        return 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -652,6 +697,26 @@ def build_parser() -> argparse.ArgumentParser:
     open_.set_defaults(func=lambda a: asyncio.run(_run_open(a)))
 
     _add_profile_commands(sub)
+
+    manager = sub.add_parser(
+        "manager",
+        help="one window to list profiles, start them, and use each browser there",
+    )
+    manager.add_argument("--host", default="127.0.0.1")
+    manager.add_argument("--port", type=int, default=8787)
+    manager.add_argument("--root", help=f"profile directory (default: {default_root()})")
+    manager.add_argument(
+        "--display",
+        choices=("auto", "host", "virtual"),
+        default="auto",
+        help="where the profile windows open",
+    )
+    manager.add_argument(
+        "--no-open",
+        action="store_true",
+        help="print the URL instead of opening a browser window",
+    )
+    manager.set_defaults(func=_cmd_manager)
 
     mcp = sub.add_parser(
         "mcp",

@@ -66,6 +66,33 @@ def test_show_full_prints_the_stored_document(
     assert json.loads(capsys.readouterr().out)["identity"] == IDENTITY
 
 
+def test_screen_and_start_url_roundtrip(tmp_path: Path) -> None:
+    assert (
+        run(
+            tmp_path,
+            "create",
+            "p",
+            "--os",
+            "windows",
+            "--screen",
+            "1366x768",
+            "--start-url",
+            "https://example.com",
+        )
+        == 0
+    )
+    stored = ProfileStore(tmp_path).load("p")
+    assert (stored.screen_width, stored.screen_height) == (1366, 768)
+    assert stored.identity["screen"]["height"] == 768
+    assert stored.start_url == "https://example.com"
+
+    assert run(tmp_path, "set", "p", "--screen", "1920x1080") == 0
+    assert ProfileStore(tmp_path).load("p").identity["screen"]["width"] == 1920
+    assert run(tmp_path, "set", "p", "--start-url", "") == 0
+    assert ProfileStore(tmp_path).load("p").start_url is None
+    assert run(tmp_path, "create", "q", "--screen", "10x10") == 2
+
+
 def test_errors_exit_with_code_two(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     run(tmp_path, "create", "p")
     assert run(tmp_path, "create", "p") == 2

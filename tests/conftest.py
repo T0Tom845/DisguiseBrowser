@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import threading
@@ -29,6 +30,19 @@ class _QuietHandler(SimpleHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_GET(self) -> None:
+        if self.path.split("?", 1)[0] != "/sample.txt":
+            super().do_GET()
+            return
+        body = (FIXTURES / "sample.txt").read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="sample.txt"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
 
 @pytest.fixture(scope="session")
@@ -64,10 +78,26 @@ async def browser() -> AsyncIterator[Browser]:
         yield instance
 
 
+async def screenshot_on_failure(tab: object) -> None:
+    """Leave a PNG in ``reports/`` when a test that holds a page fails."""
+    directory = Path("reports")
+    await asyncio.to_thread(directory.mkdir, exist_ok=True)
+    shot = getattr(tab, "screenshot", None)
+    if shot is None:
+        return
+    try:
+        await shot(directory / "failure.png")
+    except Exception:
+        return
+
+
 @pytest_asyncio.fixture
 async def page(browser: Browser) -> AsyncIterator[Page]:
     tab = await browser.new_page()
     try:
         yield tab
+    except Exception:
+        await screenshot_on_failure(tab)
+        raise
     finally:
         await tab.close()

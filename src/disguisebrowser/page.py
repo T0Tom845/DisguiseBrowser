@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from disguisebrowser.cdp import Session
 from disguisebrowser.errors import (
     CdpError,
+    DisguiseError,
     ElementNotFoundError,
     EvaluationError,
     NavigationError,
 )
+from disguisebrowser.exchange import HttpResponse, JsDialog, Pending, ResponseLog, existing_files
 from disguisebrowser.input import PRESETS, HumanProfile, Keyboard, Mouse
 from disguisebrowser.protocols import WaitUntil, World
 from disguisebrowser.snapshot import Snapshot, format_ax_tree
@@ -112,6 +114,12 @@ class Page:
         self._refs: dict[str, int] = {}
         self._closed = False
         self.dialog_action: Literal["dismiss", "accept"] = "dismiss"
+        self.dialog_prompt = ""
+        self._dialog_future: asyncio.Future[JsDialog] | None = None
+        self._open_dialog: JsDialog | None = None
+        self._responses = ResponseLog()
+        self._request_method: dict[str, str] = {}
+        self._request_done: dict[str, asyncio.Future[None]] = {}
         backend = browser._input_backend(self, session)
         self.mouse = Mouse(backend, profile=human, rng=self._rng, viewport=self._viewport_hint)
         self.keyboard = Keyboard(
@@ -168,15 +176,67 @@ class Page:
             self._invalidate_document()
 
     async def _on_dialog(self, params: dict[str, Any]) -> None:
-        log.info(
-            "dialog %s: %r → %s", params.get("type"), params.get("message"), self.dialog_action
+        dialog = JsDialog(
+            type=str(params.get("type") or "alert"),
+            message=str(params.get("message") or ""),
+            default_value=str(params.get("defaultPrompt") or ""),
+            reply=self._reply_dialog,
         )
+        log.info("dialog %s: %r", dialog.type, dialog.message)
+        waiting = self._dialog_future
+        if waiting is not None and not waiting.done():
+            self._open_dialog = dialog
+            waiting.set_result(dialog)
+            return
+        await self._auto_dialog(dialog)
+
+    async def _reply_dialog(self, accept: bool, prompt_text: str | None) -> None:
+        payload: dict[str, Any] = {"accept": accept}
+        if prompt_text is not None:
+            payload["promptText"] = prompt_text
         try:
-            await self.session.send(
-                "Page.handleJavaScriptDialog", {"accept": self.dialog_action == "accept"}
-            )
+            await self.session.send("Page.handleJavaScriptDialog", payload)
         except CdpError as exc:
             log.debug("dialog already handled: %s", exc)
+
+    async def _auto_dialog(self, dialog: JsDialog) -> None:
+        try:
+            if self.dialog_action == "accept":
+                await dialog.accept(self.dialog_prompt or None)
+            else:
+                await dialog.dismiss()
+        except DisguiseError as exc:
+            log.debug("dialog: %s", exc)
+
+    @contextlib.asynccontextmanager
+    async def expect_dialog(self, *, timeout: float = 5.0) -> Any:
+        """Arm a waiter, then trigger the dialog inside the block.
+
+        Handle it before the block ends (``accept`` / ``dismiss``). Otherwise it
+        is dismissed, so the page cannot stay blocked. ``evaluate`` that itself
+        opens the dialog must run as a task, because it does not return until
+        the dialog is handled::
+
+            async with page.expect_dialog() as pending:
+                task = asyncio.create_task(page.evaluate("prompt('name?')", world="main"))
+                dialog = await pending.value()
+                await dialog.accept("ada")
+                await task
+        """
+        if self._dialog_future is not None:
+            raise DisguiseError("already waiting for a dialog")
+        future: asyncio.Future[JsDialog] = asyncio.get_running_loop().create_future()
+        self._dialog_future = future
+        try:
+            yield Pending(future, timeout, "a JavaScript dialog")
+        finally:
+            self._dialog_future = None
+            dialog = self._open_dialog
+            self._open_dialog = None
+            if not future.done():
+                future.cancel()
+            elif dialog is not None and not dialog.handled:
+                await dialog.dismiss()
 
     def _invalidate_document(self) -> None:
         self._context_id = None
@@ -719,6 +779,102 @@ class Page:
             await asyncio.to_thread(Path(path).write_bytes, data)
         return data
 
+    async def watch_responses(self) -> None:
+        """Start passive capture of response metadata and bodies.
+
+        ``Network.enable`` records what the page already loads. It does not
+        intercept. Bodies are fetched later with ``Network.getResponseBody``,
+        which only works while this capture is on.
+        """
+        if self._responses.enabled:
+            return
+        self.session.on("Network.requestWillBeSent", self._on_request)
+        self.session.on("Network.responseReceived", self._on_response)
+        self.session.on("Network.loadingFinished", self._on_loading_finished)
+        self.session.on("Network.loadingFailed", self._on_loading_failed)
+        await self.session.send("Network.enable")
+        self._responses.enabled = True
+
+    def responses(self) -> list[HttpResponse]:
+        """Responses seen since :meth:`watch_responses`, oldest first."""
+        return list(self._responses.entries)
+
+    @contextlib.asynccontextmanager
+    async def expect_response(self, url_contains: str, *, timeout: float = 30.0) -> Any:
+        """Wait for the next response whose URL contains ``url_contains``.
+
+        Arm it before the click or ``goto`` that triggers the request. A
+        response that already arrived does not match.
+        """
+        await self.watch_responses()
+        future = self._responses.expect(url_contains)
+        try:
+            yield Pending(future, timeout, f"a response containing {url_contains!r}")
+        finally:
+            self._responses.cancel(future)
+
+    def _on_request(self, params: dict[str, Any]) -> None:
+        request = params.get("request") or {}
+        self._request_method[str(params.get("requestId", ""))] = str(request.get("method") or "GET")
+
+    def _on_response(self, params: dict[str, Any]) -> None:
+        request_id = str(params.get("requestId", ""))
+        response = params.get("response") or {}
+        headers = response.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        done = self._request_done.get(request_id)
+        if done is None:
+            done = asyncio.get_running_loop().create_future()
+            self._request_done[request_id] = done
+
+        async def read() -> bytes:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(done), 15)
+            raw = await self.session.send("Network.getResponseBody", {"requestId": request_id})
+            body = str(raw.get("body") or "")
+            if raw.get("base64Encoded"):
+                return base64.b64decode(body)
+            return body.encode()
+
+        self._responses.add(
+            HttpResponse(
+                url=str(response.get("url") or ""),
+                method=self._request_method.get(request_id, "GET"),
+                status=int(response.get("status") or 0),
+                resource_type=str(params.get("type") or ""),
+                headers={str(k): str(v) for k, v in headers.items()},
+                reader=read,
+            )
+        )
+
+    def _on_loading_finished(self, params: dict[str, Any]) -> None:
+        self._finish_request(str(params.get("requestId", "")), failed=False)
+
+    def _on_loading_failed(self, params: dict[str, Any]) -> None:
+        self._finish_request(str(params.get("requestId", "")), failed=True)
+
+    def _finish_request(self, request_id: str, *, failed: bool) -> None:
+        done = self._request_done.get(request_id)
+        if done is not None and not done.done():
+            if failed:
+                done.set_exception(DisguiseError(f"request {request_id} failed"))
+            else:
+                done.set_result(None)
+        self._request_method.pop(request_id, None)
+
+    @contextlib.asynccontextmanager
+    async def expect_download(self, *, timeout: float = 30.0) -> Any:
+        """Wait for the next file the page downloads. Arm it before the click."""
+        future = await self.browser.arm_download()
+        try:
+            yield Pending(future, timeout, "a download")
+        finally:
+            if not future.done():
+                with contextlib.suppress(ValueError):
+                    self.browser._download_waiters.remove(future)
+                future.cancel()
+
     async def cookies(self, *urls: str) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"urls": list(urls)} if urls else {}
         result = await self.session.send("Network.getCookies", params)
@@ -875,6 +1031,18 @@ class ElementHandle:
         await self.page.mouse.click(
             x, y, button=button, humanize=humanize, target_width=min(box["width"], box["height"])
         )
+
+    async def set_input_files(self, *paths: str | Path) -> None:
+        """Set the files of an ``<input type="file">``. Pass nothing to clear it."""
+        files = await asyncio.to_thread(existing_files, paths)
+        try:
+            await self.page.session.send(
+                "DOM.setFileInputFiles", {"files": files, "objectId": self.object_id}
+            )
+        except CdpError as exc:
+            raise DisguiseError(
+                f"cannot set files on this element ({exc.message}); it must be an <input type=file>"
+            ) from None
 
     async def type(self, text: str, *, humanize: bool = True, clear: bool = False) -> None:
         await self.click(humanize=humanize)

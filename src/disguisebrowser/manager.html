@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Профили — Disguise</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #100f0c;
+    --panel: #1a1814;
+    --panel-2: #221f1a;
+    --line: #322e27;
+    --text: #f4f0e6;
+    --muted: #9c9486;
+    --faint: #6f685c;
+    --amber: #e0a45a;
+    --ink: #24180c;
+    --danger: #e07a62;
+    --ok: #8fbf7a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 Cantarell, "Segoe UI", sans-serif;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+  .wrap.live { max-width: 1200px; }
+  header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; }
+  .mark {
+    margin: 0;
+    color: var(--amber);
+    font-size: 12px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+  h1 { margin: 2px 0 0; font-size: 28px; font-weight: 650; letter-spacing: -0.03em; }
+  #count { margin: 4px 0 0; color: var(--muted); }
+  .actions { display: flex; gap: 8px; }
+  button.primary, button.ghost, button.danger {
+    border-radius: 999px;
+    padding: 8px 14px;
+    border: 1px solid transparent;
+  }
+  button.primary { background: var(--amber); color: var(--ink); font-weight: 650; }
+  button.ghost { background: transparent; border-color: var(--line); color: var(--text); }
+  button.danger { background: transparent; border-color: #5c332b; color: var(--danger); }
+  button[hidden] { display: none; }
+  #banner, #toast {
+    margin: 16px 0 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #2a2116;
+    color: #f0d7b0;
+  }
+  #toast { background: #2c1d19; color: #f0c2b6; }
+  .toolbar { margin: 18px 0 10px; }
+  #search {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  #list {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .empty { margin: 0; padding: 28px 18px; color: var(--muted); }
+  article + article { border-top: 1px solid var(--line); }
+  .line { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%; flex: none;
+    background: #4a463d;
+  }
+  .dot.on { background: var(--amber); box-shadow: 0 0 0 4px rgba(224, 164, 90, .16); }
+  .dot.pending { background: var(--amber); animation: blink 1s steps(2) infinite; }
+  .dot.busy { background: transparent; box-shadow: inset 0 0 0 1.5px var(--amber); }
+  @keyframes blink { 50% { opacity: .35; } }
+  .identity {
+    flex: 1; min-width: 0; text-align: left;
+    background: none; border: 0; padding: 0;
+  }
+  .identity strong { display: block; font-size: 16px; font-weight: 650; }
+  .meta, .note {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--muted); font-size: 13px;
+  }
+  .err, .form-error { color: var(--danger); font-size: 13px; }
+  .err { display: block; white-space: normal; }
+  .form-error { margin: 0; }
+  .switch {
+    width: 46px; height: 28px; border-radius: 999px; flex: none;
+    border: 1px solid var(--line); background: #2a261f; position: relative; padding: 0;
+  }
+  .switch .knob {
+    position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+    border-radius: 50%; background: #f4f0e6; transition: transform .15s ease;
+  }
+  .switch[aria-pressed="true"] { background: var(--amber); border-color: transparent; }
+  .switch[aria-pressed="true"] .knob { transform: translateX(18px); background: var(--ink); }
+  .switch:disabled { opacity: .55; cursor: default; }
+  .editor { padding: 0 14px 14px 35px; display: grid; gap: 10px; }
+  .editor[hidden] { display: none; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+  input, select, textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  textarea { min-height: 64px; resize: vertical; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
+  .check input { width: auto; }
+  .ua { margin: 0; color: var(--faint); font-size: 12px; word-break: break-all; }
+  .row-actions { display: flex; gap: 8px; align-items: center; }
+  .visit { display: flex; gap: 6px; flex: 1 1 280px; max-width: 440px; align-items: center; }
+  .visit input { width: auto; flex: 1; min-width: 0; }
+  .visit button { flex: none; white-space: nowrap; padding: 8px 12px; }
+  #stage { margin-top: 18px; }
+  .stage-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .stage-bar form { display: flex; gap: 6px; flex: 1 1 280px; align-items: center; }
+  .stage-bar form input { flex: 1; min-width: 0; }
+  #stage-name { font-size: 15px; }
+  #stage-screen {
+    margin-top: 8px;
+    background: #070705;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: default;
+    touch-action: none;
+    user-select: none;
+  }
+  #stage-screen:focus { outline: 2px solid var(--amber); outline-offset: 2px; }
+  #stage-frame { width: 100%; height: auto; pointer-events: none; }
+  #stage-frame:not([hidden]) { display: block; }
+  #stage-wait { margin: 0; padding: 48px 16px; color: var(--muted); text-align: center; }
+  .stage-hint { margin: 8px 0 0; color: var(--faint); font-size: 13px; }
+  .confirm { display: flex; gap: 8px; align-items: center; color: var(--danger); }
+  .confirm[hidden] { display: none; }
+  footer { margin-top: 14px; color: var(--faint); font-size: 13px; }
+  dialog {
+    width: min(520px, calc(100vw - 32px));
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 16px; padding: 18px;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .55); }
+  dialog h2 { margin: 0 0 6px; font-size: 20px; }
+  dialog p.hint { margin: 0 0 12px; color: var(--muted); }
+  dialog form { display: grid; gap: 10px; }
+  @media (max-width: 640px) {
+    header { flex-direction: column; align-items: stretch; }
+    .grid { grid-template-columns: 1fr; }
+    .editor { padding-left: 14px; }
+    .line { flex-wrap: wrap; }
+    .identity { flex: 1 1 calc(100% - 80px); }
+    .visit { flex: 1 1 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <p class="mark">Disguise</p>
+      <h1>Профили</h1>
+      <p id="count"></p>
+    </div>
+    <div class="actions">
+      <button type="button" class="ghost" id="stop-all" hidden>Выключить все</button>
+      <button type="button" class="primary" id="open-create">Новый профиль</button>
+    </div>
+  </header>
+  <p id="banner" hidden></p>
+  <p id="toast" role="status" hidden></p>
+  <section id="stage" hidden>
+    <div class="stage-bar">
+      <strong id="stage-name"></strong>
+      <button type="button" class="ghost" id="stage-back">Назад</button>
+      <button type="button" class="ghost" id="stage-forward">Вперёд</button>
+      <button type="button" class="ghost" id="stage-reload">Обновить</button>
+      <form id="stage-go" autocomplete="off">
+        <input id="stage-url" type="text" inputmode="url" placeholder="https://" spellcheck="false" aria-label="Адрес страницы" autocomplete="off">
+        <button type="submit" class="primary">Открыть</button>
+      </form>
+      <button type="button" class="ghost" id="stage-close">Закрыть вид</button>
+    </div>
+    <div id="stage-screen" tabindex="0" role="application" aria-label="Страница профиля">
+      <p id="stage-wait">Открываю страницу…</p>
+      <img id="stage-frame" alt="" draggable="false" hidden>
+    </div>
+    <p class="stage-hint">Клики, прокрутка и клавиатура работают прямо здесь. Картинка чуть запаздывает.</p>
+  </section>
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Найти по имени, системе, прокси, адресу, заметке" autocomplete="off">
+  </div>
+  <div id="list"></div>
+  <footer id="foot"></footer>
+</div>
+
+<dialog id="create-dialog">
+  <h2>Новый профиль</h2>
+  <p class="hint">Разрешение можно выбрать сейчас и поменять у уже созданного профиля. Прокси, язык и заметку тоже.</p>
+  <form id="create-form" autocomplete="off">
+    <p id="create-error" class="form-error" hidden></p>
+    <label>Имя
+      <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="shop-1" autofocus>
+    </label>
+    <div class="grid">
+      <label>Система
+        <select name="os">
+          <option value="">Как у этого компьютера</option>
+          <option value="windows">Windows</option>
+          <option value="macos">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>Устройство
+        <select name="kind">
+          <option value="fpgen">Сгенерировать</option>
+          <option value="preset">Готовое</option>
+        </select>
+      </label>
+    </div>
+    <label>Разрешение
+      <input name="screen" list="screens" placeholder="как у устройства, например 1920x1080" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Прокси
+      <input name="proxy" placeholder="socks5://user:pass@host:1080" spellcheck="false">
+    </label>
+    <label class="check"><input name="geoip" type="checkbox"> Подстроить язык и часовой пояс под прокси</label>
+    <div class="grid">
+      <label>Часовой пояс
+        <input name="timezone" placeholder="Europe/Moscow">
+      </label>
+      <label>Языки
+        <input name="languages" placeholder="ru-RU,ru,en-US,en">
+      </label>
+    </div>
+    <label>Стартовая страница
+      <input name="start_url" placeholder="https://example.com" spellcheck="false" autocomplete="off">
+    </label>
+    <label>Заметка
+      <input name="notes" maxlength="280">
+    </label>
+    <div class="row-actions">
+      <button type="submit" class="primary">Создать</button>
+      <button type="button" class="ghost" id="create-cancel">Отмена</button>
+    </div>
+  </form>
+</dialog>
+<datalist id="screens">
+  <option value="1280x720"></option>
+  <option value="1280x800"></option>
+  <option value="1366x768"></option>
+  <option value="1440x900"></option>
+  <option value="1536x864"></option>
+  <option value="1600x900"></option>
+  <option value="1680x1050"></option>
+  <option value="1920x1080"></option>
+  <option value="1920x1200"></option>
+  <option value="2560x1440"></option>
+  <option value="2560x1600"></option>
+  <option value="3440x1440"></option>
+  <option value="3840x2160"></option>
+</datalist>
+
+<script>
+const list = document.querySelector("#list");
+const search = document.querySelector("#search");
+const count = document.querySelector("#count");
+const banner = document.querySelector("#banner");
+const toast = document.querySelector("#toast");
+const foot = document.querySelector("#foot");
+const stopAll = document.querySelector("#stop-all");
+const dialog = document.querySelector("#create-dialog");
+const createForm = document.querySelector("#create-form");
+const state = { profiles: [], meta: {}, open: null };
+
+const OS = { windows: "Windows", macos: "macOS", linux: "Linux" };
+
+function plural(n, one, few, many) {
+  const n10 = n % 10;
+  const n100 = n % 100;
+  if (n10 === 1 && n100 !== 11) return one;
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return few;
+  return many;
+}
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value == null || value === false) continue;
+    if (key === "class") node.className = value;
+    else node.setAttribute(key, value === true ? "" : String(value));
+  }
+  for (const child of children || []) node.append(child);
+  return node;
+}
+
+function text(value) {
+  return document.createTextNode(value == null ? "" : String(value));
+}
+
+async function api(path, options) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || ("Ошибка " + response.status));
+  return data;
+}
+
+let toastTimer = 0;
+function setToast(message) {
+  toast.textContent = message || "";
+  toast.hidden = !message;
+  clearTimeout(toastTimer);
+  if (message) toastTimer = setTimeout(() => setToast(""), 6000);
+}
+
+function bannerText() {
+  const display = state.meta.display;
+  const host = state.meta.host_display;
+  if (display === "host" && !host) {
+    return "Нет экрана ($DISPLAY), а менеджер запущен с --display host. Профили не откроются.";
+  }
+  if (display === "virtual" || !host) {
+    return "Окна идут на виртуальный экран. Работать в них можно прямо здесь: кнопка «В браузер».";
+  }
+  return "";
+}
+
+function paintChrome() {
+  const n = state.profiles.length;
+  const on = state.profiles.filter((p) => p.status === "running" || p.status === "starting").length;
+  count.textContent = n
+    ? `${n} ${plural(n, "профиль", "профиля", "профилей")} · включено ${on}`
+    : "пока пусто";
+  const message = bannerText();
+  banner.hidden = !message;
+  banner.textContent = message;
+  stopAll.hidden = on === 0;
+  const root = state.meta.root || "";
+  foot.textContent = root
+    ? `Хранятся в ${root}. Ctrl+C в терминале закрывает менеджер и окна, которые он открыл. Если закрыть только эту вкладку, профили останутся включены.`
+    : "";
+}
+
+function statusClass(status) {
+  if (status === "running") return "dot on";
+  if (status === "starting" || status === "stopping") return "dot pending";
+  if (status === "busy") return "dot busy";
+  return "dot";
+}
+
+function switchLabel(profile) {
+  if (profile.status === "busy") return `${profile.name} уже открыт в другом окне`;
+  if (profile.status === "running" || profile.status === "stopping") return `Выключить ${profile.name}`;
+  return `Включить ${profile.name}`;
+}
+
+function metaLine(profile) {
+  const screen = (profile.screen || "").replace("x", "×");
+  return [OS[profile.os] || profile.os, screen, profile.proxy || "без прокси"].filter(Boolean).join(" · ");
+}
+
+function detailLine(profile) {
+  const screen = (profile.screen || "").replace("x", "×");
+  return [
+    OS[profile.os] || profile.os,
+    screen,
+    profile.cores ? `${profile.cores} ядер` : "",
+    profile.gpu,
+    profile.proxy || "без прокси",
+  ].filter(Boolean).join(" · ");
+}
+
+function haystack(profile) {
+  return [profile.name, profile.os, profile.notes, profile.gpu, profile.proxy, profile.timezone, profile.screen, profile.start_url]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function field(title, control) {
+  return el("label", null, [text(title), control]);
+}
+
+function normalizeScreen(value) {
+  return String(value || "").trim().toLowerCase().replace(/×/g, "x").replace(/\*/g, "x").replace(/\s+/g, "");
+}
+
+function openLabel() {
+  return "В браузер";
+}
+
+function editor(profile) {
+  const notes = el("textarea", { name: "notes" });
+  notes.value = profile.notes || "";
+  const screen = el("input", {
+    name: "screen",
+    list: "screens",
+    placeholder: "1920x1080",
+    autocomplete: "off",
+    spellcheck: "false",
+  });
+  screen.value = profile.screen || "";
+  if (profile.status === "running" || profile.status === "busy") {
+    screen.title = "Сначала выключи профиль: размер применяется при запуске";
+  }
+  const timezone = el("input", { name: "timezone", placeholder: "Europe/Moscow" });
+  timezone.value = profile.timezone || "";
+  const languages = el("input", { name: "languages", placeholder: "ru-RU,ru,en-US,en" });
+  languages.value = (profile.languages || []).join(",");
+  const proxy = el("input", {
+    name: "proxy",
+    placeholder: profile.proxy || "socks5://user:pass@host:1080",
+    spellcheck: "false",
+    autocomplete: "off",
+  });
+  const clearProxy = el("input", { name: "clearProxy", type: "checkbox" });
+  const geoip = el("input", { name: "geoip", type: "checkbox" });
+  if (profile.geoip) geoip.checked = true;
+  const confirm = el("div", { class: "confirm", hidden: true }, [
+    text("Удалятся cookies и история. "),
+    el("button", { type: "button", class: "danger", "data-action": "delete-yes" }, [text("Удалить")]),
+    el("button", { type: "button", class: "ghost", "data-action": "delete-cancel" }, [text("Отмена")]),
+  ]);
+  const form = el("form", { class: "editor", autocomplete: "off" }, [
+    el("p", { class: "ua" }, [text(profile.user_agent || "")]),
+    field("Разрешение", screen),
+    el("p", { class: "ua" }, [text(
+      "Новый размер сайты увидят после выключения. Смена разрешения один раз пересчитывает шрифты и шум canvas."
+    )]),
+    field("Заметка", notes),
+    el("div", { class: "grid" }, [
+      field("Часовой пояс", timezone),
+      field("Языки", languages),
+    ]),
+    field("Новый прокси — пустое поле не меняет текущий", proxy),
+    el("label", { class: "check" }, [clearProxy, text("Убрать прокси")]),
+    el("label", { class: "check" }, [geoip, text("Подстроить язык и часовой пояс под прокси")]),
+    el("div", { class: "row-actions" }, [
+      el("button", { type: "submit", class: "primary" }, [text("Сохранить")]),
+      el("button", { type: "button", class: "danger", "data-action": "delete-ask" }, [text("Удалить")]),
+      confirm,
+    ]),
+  ]);
+  if (!state.open || state.open !== profile.name) form.hidden = true;
+  return form;
+}
+
+function article(profile) {
+  const dot = el("span", { class: statusClass(profile.status), "data-role": "dot" });
+  const bits = [
+    el("strong", null, [text(profile.name)]),
+    el("span", { class: "meta", "data-role": "meta", title: detailLine(profile) }, [text(metaLine(profile))]),
+  ];
+  if (profile.notes) bits.push(el("span", { class: "note" }, [text(profile.notes)]));
+  if (profile.error) {
+    bits.push(el("span", { class: "err", "data-role": "err", title: profile.error }, [text(profile.error)]));
+  }
+  const pending = profile.status === "starting" || profile.status === "stopping" || profile.status === "busy";
+  const url = el("input", {
+    "data-role": "url",
+    type: "text",
+    inputmode: "url",
+    placeholder: "Куда зайти — https://",
+    "aria-label": "Адрес",
+    spellcheck: "false",
+    autocomplete: "off",
+  });
+  url.value = profile.start_url || "";
+  url.disabled = pending;
+  const open = el("button", {
+    type: "submit",
+    class: "ghost",
+    "data-role": "open",
+    title: "Открыть страницу здесь и работать в ней",
+  }, [text(openLabel())]);
+  open.disabled = pending;
+  const visit = el("form", { class: "visit", autocomplete: "off" }, [url, open]);
+  const sw = el("button", {
+    type: "button",
+    class: "switch",
+    role: "switch",
+    "data-action": "switch",
+    "data-role": "switch",
+    "aria-pressed": profile.status === "running" || profile.status === "stopping" || profile.status === "busy" ? "true" : "false",
+    "aria-label": switchLabel(profile),
+    title: switchLabel(profile),
+  }, [el("span", { class: "knob" })]);
+  if (pending || profile.status === "busy") sw.disabled = true;
+  const node = el("article", { "data-name": profile.name, "data-hay": haystack(profile) }, [
+    el("div", { class: "line" }, [
+      dot,
+      el("button", { type: "button", class: "identity", "data-action": "edit" }, bits),
+      visit,
+      sw,
+    ]),
+    editor(profile),
+  ]);
+  return node;
+}
+
+function applyFilter() {
+  const query = search.value.trim().toLowerCase();
+  let shown = 0;
+  for (const node of list.querySelectorAll("article")) {
+    const hide = Boolean(query) && !(node.dataset.hay || "").includes(query);
+    node.hidden = hide;
+    if (!hide) shown += 1;
+  }
+  const existing = list.querySelector(".empty");
+  if (state.profiles.length && shown === 0 && !existing) {
+    list.append(el("p", { class: "empty" }, [text("Ничего не нашлось")]));
+  }
+  if ((shown > 0 || !query) && existing) existing.remove();
+}
+
+function captureUrlDraft() {
+  const input = document.activeElement;
+  if (!input || input.getAttribute("data-role") !== "url") return null;
+  const owner = input.closest("article");
+  if (!owner || !owner.dataset.name) return null;
+  return {
+    name: owner.dataset.name,
+    value: input.value,
+    start: input.selectionStart,
+    end: input.selectionEnd,
+  };
+}
+
+function restoreUrlDraft(draft) {
+  if (!draft) return;
+  const input = list.querySelector(`article[data-name="${CSS.escape(draft.name)}"] [data-role=url]`);
+  if (!input) return;
+  input.value = draft.value;
+  input.focus();
+  if (draft.start != null) input.setSelectionRange(draft.start, draft.end);
+}
+
+function renderList() {
+  const draft = captureUrlDraft();
+  if (!state.profiles.length) {
+    list.replaceChildren(el("p", { class: "empty" }, [
+      text("Пока пусто. Новый профиль — отдельное устройство со своими cookies и историей."),
+    ]));
+    return;
+  }
+  list.replaceChildren(...state.profiles.map(article));
+  applyFilter();
+  if (draft) {
+    restoreUrlDraft(draft);
+    return;
+  }
+  if (state.open) {
+    const node = list.querySelector(`article[data-name="${CSS.escape(state.open)}"] textarea`);
+    if (node) node.focus();
+  }
+}
+
+function paintStatuses() {
+  for (const profile of state.profiles) {
+    const node = list.querySelector(`article[data-name="${CSS.escape(profile.name)}"]`);
+    if (!node) {
+      renderList();
+      return;
+    }
+    const dot = node.querySelector("[data-role=dot]");
+    dot.className = statusClass(profile.status);
+    const sw = node.querySelector("[data-role=switch]");
+    const on = profile.status === "running" || profile.status === "stopping" || profile.status === "busy";
+    sw.setAttribute("aria-pressed", on ? "true" : "false");
+    sw.setAttribute("aria-label", switchLabel(profile));
+    sw.title = switchLabel(profile);
+    sw.disabled = profile.status === "starting" || profile.status === "stopping" || profile.status === "busy";
+    const openBtn = node.querySelector("[data-role=open]");
+    const urlInput = node.querySelector("[data-role=url]");
+    const blocked = sw.disabled;
+    if (openBtn) {
+      openBtn.disabled = blocked;
+      openBtn.textContent = openLabel();
+    }
+    if (urlInput) urlInput.disabled = blocked;
+    let err = node.querySelector("[data-role=err]");
+    if (profile.error) {
+      if (!err) {
+        err = el("span", { class: "err", "data-role": "err" });
+        node.querySelector(".identity").append(err);
+      }
+      err.textContent = profile.error;
+      err.title = profile.error;
+    } else if (err) {
+      err.remove();
+    }
+  }
+}
+
+function fingerprint(profiles) {
+  return profiles.map((profile) => [
+    profile.name,
+    profile.status,
+    profile.error || "",
+    profile.notes || "",
+    profile.proxy || "",
+    profile.os || "",
+    profile.screen || "",
+    profile.start_url || "",
+    profile.timezone || "",
+  ].join("\u0001")).join("\n");
+}
+
+function sync(data) {
+  const nextProfiles = data.profiles || [];
+  const previous = fingerprint(state.profiles);
+  const next = fingerprint(nextProfiles);
+  state.profiles = nextProfiles;
+  state.meta = data;
+  paintChrome();
+  if (previous === next && list.querySelector("article, .empty")) {
+    applyFilter();
+    return;
+  }
+  const stillOpen = state.open && nextProfiles.some((profile) => profile.name === state.open);
+  if (stillOpen) paintStatuses();
+  else {
+    state.open = null;
+    renderList();
+  }
+  applyFilter();
+  watchStage();
+}
+
+async function refresh() {
+  try {
+    sync(await api("/api/profiles"));
+  } catch (error) {
+    setToast(error.message);
+  }
+}
+
+async function mutate(path, options) {
+  try {
+    sync(await api(path, options));
+  } catch (error) {
+    setToast(error.message);
+    try { sync(await api("/api/profiles")); } catch (_) { /* still down */ }
+  }
+}
+
+function urlOf(name) {
+  const input = list.querySelector(`article[data-name="${CSS.escape(name)}"] [data-role=url]`);
+  return input ? input.value.trim() : "";
+}
+
+async function onOpen(name, show) {
+  const profile = state.profiles.find((item) => item.name === name);
+  if (!profile || profile.status === "starting" || profile.status === "stopping" || profile.status === "busy") return;
+  const showStage = show !== false;
+  if (profile.status !== "running") {
+    profile.status = "starting";
+    paintStatuses();
+    paintChrome();
+  }
+  await mutate(`/api/profiles/${encodeURIComponent(name)}/open`, {
+    method: "POST",
+    body: JSON.stringify({ url: urlOf(name) }),
+  });
+  const current = state.profiles.find((item) => item.name === name);
+  if (!current || current.status !== "running") {
+    if (stage.name === name) closeStage();
+    return;
+  }
+  if (!showStage) return;
+  if (stage.name !== name) openStage(name);
+  else focusStage(current);
+}
+
+async function onSwitch(name) {
+  const profile = state.profiles.find((item) => item.name === name);
+  if (!profile || profile.status === "starting" || profile.status === "stopping" || profile.status === "busy") return;
+  if (profile.status !== "running") {
+    await onOpen(name, false);
+    return;
+  }
+  profile.status = "stopping";
+  paintStatuses();
+  paintChrome();
+  await mutate(`/api/profiles/${encodeURIComponent(name)}/stop`, { method: "POST" });
+}
+
+function toggleEditor(name) {
+  state.open = state.open === name ? null : name;
+  renderList();
+}
+
+function fieldOf(form, name) {
+  return form.elements.namedItem(name);
+}
+
+async function save(name, form) {
+  const profile = state.profiles.find((item) => item.name === name);
+  const body = {
+    notes: fieldOf(form, "notes").value,
+    timezone: fieldOf(form, "timezone").value.trim(),
+    languages: fieldOf(form, "languages").value.trim(),
+    geoip: fieldOf(form, "geoip").checked,
+  };
+  const screen = normalizeScreen(fieldOf(form, "screen").value);
+  if (screen && (!profile || screen !== normalizeScreen(profile.screen))) body.screen = screen;
+  if (fieldOf(form, "clearProxy").checked) body.proxy = "";
+  else if (fieldOf(form, "proxy").value.trim()) body.proxy = fieldOf(form, "proxy").value.trim();
+  try {
+    sync(await api(`/api/profiles/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }));
+    state.open = null;
+    renderList();
+    setToast("Сохранено");
+  } catch (error) {
+    setToast(error.message);
+  }
+}
+
+list.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-action]");
+  if (!action) return;
+  const articleNode = action.closest("article");
+  const name = articleNode && articleNode.dataset.name;
+  if (!name) return;
+  if (action.dataset.action === "switch") onSwitch(name);
+  if (action.dataset.action === "edit") toggleEditor(name);
+  if (action.dataset.action === "delete-ask") action.closest("form").querySelector(".confirm").hidden = false;
+  if (action.dataset.action === "delete-cancel") action.closest(".confirm").hidden = true;
+  if (action.dataset.action === "delete-yes") {
+    state.open = null;
+    mutate(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
+  }
+});
+
+list.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const name = form.closest("article").dataset.name;
+  if (form.classList.contains("visit")) onOpen(name);
+  else save(name, form);
+});
+
+list.addEventListener("change", (event) => {
+  if (event.target.name !== "clearProxy") return;
+  event.target.form.elements.namedItem("proxy").disabled = event.target.checked;
+});
+
+search.addEventListener("input", applyFilter);
+
+const createError = document.querySelector("#create-error");
+function setCreateError(message) {
+  createError.hidden = !message;
+  createError.textContent = message || "";
+}
+document.querySelector("#open-create").addEventListener("click", () => {
+  setCreateError("");
+  dialog.showModal();
+});
+document.querySelector("#create-cancel").addEventListener("click", () => dialog.close());
+dialog.addEventListener("close", () => setCreateError(""));
+stopAll.addEventListener("click", () => {
+  if (window.confirm("Выключить все профили, открытые из этого окна?")) {
+    mutate("/api/stop-all", { method: "POST" });
+  }
+});
+
+createForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(createForm);
+  const body = {
+    name: String(data.get("name") || "").trim(),
+    kind: data.get("kind"),
+    notes: String(data.get("notes") || ""),
+    geoip: data.get("geoip") === "on",
+  };
+  for (const key of ["os", "proxy", "timezone", "languages", "screen", "start_url"]) {
+    const value = String(data.get(key) || "").trim();
+    if (value) body[key] = value;
+  }
+  try {
+    sync(await api("/api/profiles", { method: "POST", body: JSON.stringify(body) }));
+    createForm.reset();
+    dialog.close();
+    setCreateError("");
+  } catch (error) {
+    setCreateError(error.message);
+  }
+});
+
+const stage = { name: null, generation: 0 };
+const stageNode = document.querySelector("#stage");
+const stageScreen = document.querySelector("#stage-screen");
+const stageFrame = document.querySelector("#stage-frame");
+const stageWait = document.querySelector("#stage-wait");
+const stageUrl = document.querySelector("#stage-url");
+const stageName = document.querySelector("#stage-name");
+const inputQueue = [];
+let inputBusy = false;
+let lastPoint = null;
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function watchStage() {
+  if (!stage.name) return;
+  const profile = state.profiles.find((item) => item.name === stage.name);
+  if (!profile || profile.status === "stopped" || profile.status === "stopping") closeStage();
+}
+
+function closeStage() {
+  stage.name = null;
+  stage.generation += 1;
+  stageNode.hidden = true;
+  document.querySelector(".wrap").classList.remove("live");
+  stageFrame.removeAttribute("src");
+  stageFrame.hidden = true;
+  inputQueue.length = 0;
+}
+
+function focusStage(profile) {
+  if (document.activeElement !== stageUrl) stageUrl.value = profile.start_url || stageUrl.value;
+  stageScreen.focus({ preventScroll: true });
+}
+
+function openStage(name) {
+  const profile = state.profiles.find((item) => item.name === name);
+  stage.name = name;
+  stage.generation += 1;
+  const generation = stage.generation;
+  stageNode.hidden = false;
+  document.querySelector(".wrap").classList.add("live");
+  stageName.textContent = name;
+  stageUrl.value = (profile && profile.start_url) || urlOf(name);
+  stageFrame.hidden = true;
+  stageFrame.removeAttribute("src");
+  stageWait.hidden = false;
+  stageWait.textContent = "Открываю страницу…";
+  stageScreen.focus({ preventScroll: true });
+  pumpFrames(generation, name);
+}
+
+async function pumpFrames(generation, name) {
+  let previous = "";
+  try {
+    while (stage.generation === generation) {
+      if (document.hidden) {
+        await waitMs(300);
+        continue;
+      }
+      let response;
+      try {
+        response = await fetch(`/api/profiles/${encodeURIComponent(name)}/frame`, { cache: "no-store" });
+      } catch (_) {
+        if (stage.generation !== generation) return;
+        stageWait.hidden = false;
+        stageWait.textContent = "Связь с окном прервалась";
+        await waitMs(500);
+        continue;
+      }
+      if (stage.generation !== generation) return;
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (stage.generation !== generation) return;
+        if (response.status === 409 || response.status === 404) {
+          closeStage();
+          return;
+        }
+        stageWait.hidden = false;
+        stageWait.textContent = data.error || "Нет картинки";
+        await waitMs(400);
+        continue;
+      }
+      const width = Number(response.headers.get("X-View-Width")) || 0;
+      const height = Number(response.headers.get("X-View-Height")) || 0;
+      const seen = response.headers.get("X-View-URL") || "";
+      const blob = await response.blob();
+      if (stage.generation !== generation) return;
+      const next = URL.createObjectURL(blob);
+      await new Promise((resolve) => {
+        stageFrame.onload = resolve;
+        stageFrame.onerror = resolve;
+        stageFrame.src = next;
+      });
+      if (stage.generation !== generation) {
+        URL.revokeObjectURL(next);
+        return;
+      }
+      if (previous) URL.revokeObjectURL(previous);
+      previous = next;
+      stageFrame.dataset.viewW = String(width);
+      stageFrame.dataset.viewH = String(height);
+      stageFrame.hidden = false;
+      stageWait.hidden = true;
+      if (seen && document.activeElement !== stageUrl) stageUrl.value = seen;
+      await waitMs(40);
+    }
+  } finally {
+    if (previous) URL.revokeObjectURL(previous);
+  }
+}
+
+function viewPoint(event) {
+  const rect = stageFrame.getBoundingClientRect();
+  const viewW = Number(stageFrame.dataset.viewW) || stageFrame.naturalWidth;
+  const viewH = Number(stageFrame.dataset.viewH) || stageFrame.naturalHeight;
+  if (!rect.width || !rect.height || !viewW || !viewH) return null;
+  const x = (event.clientX - rect.left) * viewW / rect.width;
+  const y = (event.clientY - rect.top) * viewH / rect.height;
+  if (x < 0 || y < 0 || x > viewW || y > viewH) return null;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+function buttonOf(event) {
+  return ["left", "middle", "right"][event.button] || "left";
+}
+
+function enqueueInput(event) {
+  if (!stage.name) return;
+  event.profile = stage.name;
+  const last = inputQueue[inputQueue.length - 1];
+  if (event.kind === "move" && last && last.kind === "move" && last.profile === event.profile) {
+    inputQueue[inputQueue.length - 1] = event;
+  } else inputQueue.push(event);
+  drainInput();
+}
+
+async function drainInput() {
+  if (inputBusy) return;
+  inputBusy = true;
+  while (inputQueue.length) {
+    const event = inputQueue.shift();
+    if (event.profile !== stage.name) continue;
+    const profile = event.profile;
+    delete event.profile;
+    try {
+      const response = await fetch(`/api/profiles/${encodeURIComponent(profile)}/input`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(event),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || ("Ошибка " + response.status));
+      }
+    } catch (error) {
+      setToast(error.message);
+      inputQueue.length = 0;
+      break;
+    }
+  }
+  inputBusy = false;
+  if (inputQueue.length) drainInput();
+}
+
+function chord(event) {
+  const keyName = event.key;
+  if (keyName === "Control" || keyName === "Alt" || keyName === "Meta" || keyName === "Shift") return "";
+  const mods = [];
+  if (event.ctrlKey) mods.push("Control");
+  if (event.altKey) mods.push("Alt");
+  if (event.metaKey) mods.push("Meta");
+  if (event.shiftKey) mods.push("Shift");
+  const key = keyName.length === 1 ? keyName.toUpperCase() : keyName;
+  return [...mods, key].join("+");
+}
+
+stageScreen.addEventListener("pointerdown", (event) => {
+  stageScreen.focus({ preventScroll: true });
+  try { stageScreen.setPointerCapture(event.pointerId); } catch (_) { /* pointer already gone */ }
+  const point = viewPoint(event);
+  if (!point) return;
+  lastPoint = point;
+  enqueueInput({ kind: "down", ...point, button: buttonOf(event) });
+});
+stageScreen.addEventListener("pointermove", (event) => {
+  const point = viewPoint(event);
+  if (!point) return;
+  lastPoint = point;
+  enqueueInput({ kind: "move", ...point, button: "left" });
+});
+stageScreen.addEventListener("pointerup", (event) => {
+  const point = viewPoint(event) || lastPoint;
+  if (!point) return;
+  lastPoint = point;
+  enqueueInput({ kind: "up", ...point, button: buttonOf(event) });
+});
+stageScreen.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const point = viewPoint(event) || lastPoint;
+  if (!point) return;
+  let dx = event.deltaX;
+  let dy = event.deltaY;
+  if (event.deltaMode === 1) { dx *= 16; dy *= 16; }
+  else if (event.deltaMode === 2) { dx *= window.innerHeight; dy *= window.innerHeight; }
+  dx = Math.max(-2000, Math.min(2000, dx));
+  dy = Math.max(-2000, Math.min(2000, dy));
+  enqueueInput({ kind: "wheel", ...point, dx, dy, button: "left" });
+}, { passive: false });
+stageScreen.addEventListener("contextmenu", (event) => event.preventDefault());
+stageScreen.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
+  const altGr = event.altKey && event.ctrlKey && !event.metaKey && event.key.length === 1;
+  if (!altGr && (event.ctrlKey || event.metaKey || event.altKey || event.key.length > 1)) {
+    const key = chord(event);
+    if (!key) return;
+    event.preventDefault();
+    enqueueInput({ kind: "press", key });
+    return;
+  }
+  if (event.key.length === 1) {
+    event.preventDefault();
+    enqueueInput({ kind: "text", text: event.key });
+  }
+});
+stageScreen.addEventListener("paste", (event) => {
+  const pasted = event.clipboardData ? event.clipboardData.getData("text") : "";
+  if (!pasted) return;
+  event.preventDefault();
+  enqueueInput({ kind: "text", text: pasted });
+});
+stageScreen.addEventListener("compositionend", (event) => {
+  if (event.data) enqueueInput({ kind: "text", text: event.data });
+});
+
+document.querySelector("#stage-close").addEventListener("click", closeStage);
+document.querySelector("#stage-back").addEventListener("click", () => enqueueInput({ kind: "back" }));
+document.querySelector("#stage-forward").addEventListener("click", () => enqueueInput({ kind: "forward" }));
+document.querySelector("#stage-reload").addEventListener("click", () => enqueueInput({ kind: "reload" }));
+document.querySelector("#stage-go").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!stage.name) return;
+  const row = list.querySelector(`article[data-name="${CSS.escape(stage.name)}"] [data-role=url]`);
+  if (row) row.value = stageUrl.value;
+  onOpen(stage.name);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 1500);
+</script>
+</body>
+</html>
